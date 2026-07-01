@@ -114,7 +114,29 @@ def leggi_scheda_ai(id: uuid.UUID, db: Session = Depends(database.get_db)):
     if not scheda:
         raise HTTPException(status_code=404, detail="Scheda non trovata")
     return scheda
-
+    
+@app.get("/v1/archivio")
+def ottieni_archivio_completo(db: Session = Depends(database.get_db)):
+    # Recuperiamo solo le sentenze VALIDATE (l'archivio ufficiale)
+    sentenze = db.query(models.Scheda).join(models.Fascicolo).filter(
+        models.Fascicolo.stato == models.StatoFascicolo.Validato
+    ).all()
+    
+    # Trasformiamo i dati in una lista pulita per l'archivio
+    archivio = []
+    for s in sentenze:
+        # Recuperiamo il nome del file dal fascicolo collegato
+        fascicolo = db.query(models.Fascicolo).filter(models.Fascicolo.id == s.id_fascicolo).first()
+        nome_file = os.path.basename(fascicolo.file_originale) if fascicolo else ""
+        
+        archivio.append({
+            "id": str(s.id_fascicolo),
+            "organo": s.organo_corrente,
+            "numero": s.numero_sentenza_corrente,
+            "massima": s.massima_corrente,
+            "file_url": f"/storage/{nome_file}"
+        })
+    return archivio
 @app.patch("/v1/fascicoli/{id}/validate")
 def valida_sentenza(id: uuid.UUID, payload: schemas.ValidazioneInput, db: Session = Depends(database.get_db)):
     fascicolo = db.query(models.Fascicolo).filter(models.Fascicolo.id == id).first()
