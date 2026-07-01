@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 import models, schemas, database
 
+# Inizializzazione Database
 models.Base.metadata.create_all(bind=database.engine)
 
 app = FastAPI(title="Osservatorio ACDT - Pro AI")
@@ -32,30 +33,30 @@ app.mount("/storage", StaticFiles(directory="storage"), name="storage")
 # --- LOGICA IA AVANZATA ---
 def analizza_sentenza_ai(id_fascicolo: str, file_path: str):
     db = database.SessionLocal()
-    client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    
+    # Recupero chiave API
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        print("!!! ERRORE: Chiave OPENAI_API_KEY mancante nelle impostazioni di Render !!!")
+        return
+
+    client = openai.OpenAI(api_key=api_key)
     
     try:
-        print(f"--- ANALISI SENTENZA: {id_fascicolo} ---")
         doc = fitz.open(file_path)
-        # Leggiamo le prime 6 pagine per essere sicuri di prendere tutto il contenuto
         testo = "".join([p.get_text() for p in doc.pages(0, 6)])
         doc.close()
-
-        if not testo or len(testo) < 100:
-            raise ValueError("Il PDF non contiene testo leggibile (scansione immagine)")
 
         prompt_sistema = """
         Sei un magistrato tributarista dell'Ufficio del Massimario. 
         Analizza la sentenza ed estrai i dati tecnici.
-        REGOLE OBBLIGATORIE:
-        1. MASSIMA: Scrivi una massima tecnica, astratta, universale. Inizia con 'In tema di...'. Non usare nomi di persone.
-        2. ORGANO: Identifica chiaramente la Corte (es. CGT II Grado Veneto).
-        3. NUMERO: Estrai numero sentenza e anno (es. 123/2024).
-        4. DATA: Estrai la data di deposito in formato GG-MM-AAAA.
-        5. NORME: Elenca gli articoli di legge principali.
-
-        Rispondi ESCLUSIVAMENTE con un oggetto JSON:
-        {"organo": "", "numero": "", "data": "", "massima": "", "norme": ""}
+        REGOLE:
+        1. MASSIMA: Scrivi una massima tecnica, astratta, universale. Inizia con 'In tema di...'.
+        2. ORGANO: Nome della Corte (es. CGT II Grado Veneto).
+        3. NUMERO: Numero sentenza e anno (es. 123/2024).
+        4. DATA: Data deposito in formato GG-MM-AAAA.
+        5. NORME: Articoli di legge principali.
+        Rispondi ESCLUSIVAMENTE con un oggetto JSON.
         """
         
         response = client.chat.completions.create(
@@ -67,44 +68,26 @@ def analizza_sentenza_ai(id_fascicolo: str, file_path: str):
             response_format={ "type": "json_object" }
         )
         
-        # Analisi della risposta
-        risposta_testo = response.choices[0].message.content
-        print(f"Risposta IA: {risposta_testo}")
-        dati = json.loads(risposta_testo)
+        dati = json.loads(response.choices[0].message.content)
 
-        # Salvataggio nel Database
         nuova_scheda = models.Scheda(
             id_fascicolo=id_fascicolo,
-            organo_ai=dati.get("organo", "Non rilevato"),
-            numero_sentenza_ai=dati.get("numero", "N/D"),
-            massima_ai=dati.get("massima", "Errore generazione massima"),
-            note_riservate=f"Data: {dati.get('data')} | Norme: {dati.get('norme')}",
-            punteggio_confidenza=0.95
+            organo_ai=dati.get("organo"),
+            numero_sentenza_ai=dati.get("numero"),
+            massima_ai=dati.get("massima"),
+            note_riservate=f"Data: {dati.get('data')} | Norme: {dati.get('norme')}"
         )
         db.add(nuova_scheda)
-        
         f = db.query(models.Fascicolo).filter(models.Fascicolo.id == id_fascicolo).first()
-        if f:
-            f.stato = models.StatoFascicolo.Da_validare
-        
+        if f: f.stato = models.StatoFascicolo.Da_validare
         db.commit()
-        print("--- SCHEDA SALVATA CON SUCCESSO ---")
 
     except Exception as e:
-        print(f"!!! ERRORE CRITICO IA: {e} !!!")
-        # Se fallisce OpenAI, creiamo una scheda di errore per avvisare l'utente
-        errore_scheda = models.Scheda(
-            id_fascicolo=id_fascicolo,
-            organo_ai="ERRORE IA",
-            massima_ai=f"L'intelligenza artificiale non è riuscita ad analizzare il file. Dettaglio: {str(e)[:200]}",
-            note_riservate="VERIFICARE CHIAVE OPENAI"
-        )
-        db.add(errore_scheda)
-        db.commit()
+        print(f"Errore IA: {e}")
     finally:
         db.close()
 
-# --- ENDPOINTS (Semplificati per stabilità) ---
+# --- ENDPOINTS ---
 @app.get("/")
 def health(): return {"status": "ok"}
 
@@ -142,7 +125,6 @@ def validate(id: uuid.UUID, payload: schemas.ValidazioneInput, db: Session = Dep
 
 @app.get("/v1/ricerca/ai")
 def ricerca_ai(domanda: str, db: Session = Depends(database.get_db)):
-    # Ricerca testuale semplice nelle massime validate
     return db.query(models.Scheda).filter(models.Scheda.massima_corrente.ilike(f"%{domanda}%")).all()
 
 @app.get("/v1/archivio")
@@ -156,4 +138,5 @@ def get_arch(db: Session = Depends(database.get_db)):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
