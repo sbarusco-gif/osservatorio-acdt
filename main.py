@@ -151,7 +151,7 @@ def cerca_simile(testo_ricerca: str, db: Session = Depends(database.get_db)):
 if __name__ == "__main__":
     import uvicorn
     import os
-    # Render assegna automaticamente una porta, noi la leggiamo. 
-    # Se non la trova (tipo sul tuo PC), usa la 8000.
+    # Render usa la variabile d'ambiente PORT. Se non la trova, usa 10000.
     port = int(os.environ.get("PORT", 10000))
+    # Importante: host deve essere 0.0.0.0 per il Cloud
     uvicorn.run(app, host="0.0.0.0", port=port)
