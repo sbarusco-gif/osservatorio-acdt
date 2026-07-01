@@ -14,7 +14,7 @@ import models, schemas, database
 # Inizializzazione Database
 models.Base.metadata.create_all(bind=database.engine)
 
-app = FastAPI(title="Osservatorio ACDT")
+app = FastAPI(title="Osservatorio ACDT - AI Edition")
 
 app.add_middleware(
     CORSMiddleware,
@@ -31,20 +31,25 @@ if not os.path.exists(UPLOAD_DIR):
 app.mount("/storage", StaticFiles(directory="storage"), name="storage")
 client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# --- ANALISI AI ---
+# --- FUNZIONE ANALISI AI (MASSIMA GIURIDICA) ---
 def analizza_sentenza_ai(id_fascicolo: str, file_path: str):
     db = database.SessionLocal()
     try:
         doc = fitz.open(file_path)
-        testo = "".join([p.get_text() for p in doc.pages(0, 4)])
+        testo = "".join([p.get_text() for p in doc.pages(0, 5)])
         doc.close()
-        prompt = "Sei un esperto del Massimario. Estrai in JSON: organo, numero, data, massima, norme."
+
+        prompt_sistema = """Sei un esperto dell'Ufficio Massimario. Analizza la sentenza e restituisci un JSON con:
+        'organo', 'numero', 'data' (GG-MM-AAAA), 'norme', 
+        'massima': redigi una massima tecnica, astratta e universale (senza nomi di parti)."""
+        
         response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role": "system", "content": prompt}, {"role": "user", "content": testo[:12000]}],
+            messages=[{"role": "system", "content": prompt_sistema}, {"role": "user", "content": testo[:12000]}],
             response_format={ "type": "json_object" }
         )
         dati = json.loads(response.choices[0].message.content)
+        
         nuova_scheda = models.Scheda(
             id_fascicolo=id_fascicolo,
             organo_ai=dati.get("organo"),
@@ -57,13 +62,21 @@ def analizza_sentenza_ai(id_fascicolo: str, file_path: str):
         if f: f.stato = models.StatoFascicolo.Da_validare
         db.commit()
     except Exception as e:
-        print(f"Errore: {e}")
+        print(f"Errore IA: {e}")
     finally:
         db.close()
 
-# --- ENDPOINTS ---
+# --- RICERCA AI ---
+@app.get("/v1/ricerca/ai")
+def ricerca_ai(domanda: str, db: Session = Depends(database.get_db)):
+    schede = db.query(models.Scheda).join(models.Fascicolo).filter(models.Fascicolo.stato == models.StatoFascicolo.Validato).all()
+    if not schede: return []
+    # Logica di filtro semantico simulato per stabilità
+    return [s for s in schede if domanda.lower() in s.massima_corrente.lower() or domanda.lower() in s.organo_corrente.lower()][:10]
+
+# --- ALTRI ENDPOINTS ---
 @app.get("/")
-def health_check(): return {"status": "ok"}
+def health(): return {"status": "ok"}
 
 @app.post("/v1/fascicoli/upload")
 async def upload(background_tasks: BackgroundTasks, file: UploadFile = File(...), db: Session = Depends(database.get_db)):
@@ -82,17 +95,17 @@ def list_f(db: Session = Depends(database.get_db)): return db.query(models.Fasci
 def get_s(id: uuid.UUID, db: Session = Depends(database.get_db)): 
     return db.query(models.Scheda).filter(models.Scheda.id_fascicolo == id).first()
 
-@app.get("/v1/ricerca/ai")
-def ricerca_ai(domanda: str, db: Session = Depends(database.get_db)):
-    schede = db.query(models.Scheda).join(models.Fascicolo).filter(models.Fascicolo.stato == models.StatoFascicolo.Validato).all()
-    if not schede: return []
-    # Logica semplificata per evitare timeout
-    return [s for s in schede if domanda.lower() in s.massima_corrente.lower()][:5]
-
 @app.get("/v1/archivio")
 def get_arch(db: Session = Depends(database.get_db)):
     data = db.query(models.Scheda).join(models.Fascicolo).filter(models.Fascicolo.stato == models.StatoFascicolo.Validato).all()
-    return [{"organo": s.organo_corrente, "numero": s.numero_sentenza_corrente, "massima": s.massima_corrente, "file_url": f"/storage/{os.path.basename(s.id_fascicolo)}"} for s in data]
+    res = []
+    for s in data:
+        f = db.query(models.Fascicolo).filter(models.Fascicolo.id == s.id_fascicolo).first()
+        res.append({
+            "organo": s.organo_corrente, "numero": s.numero_sentenza_corrente, 
+            "massima": s.massima_corrente, "file_url": f"/storage/{os.path.basename(f.file_originale)}" if f else ""
+        })
+    return res
 
 @app.patch("/v1/fascicoli/{id}/validate")
 def validate(id: uuid.UUID, payload: schemas.ValidazioneInput, db: Session = Depends(database.get_db)):
@@ -100,7 +113,12 @@ def validate(id: uuid.UUID, payload: schemas.ValidazioneInput, db: Session = Dep
     s = db.query(models.Scheda).filter(models.Scheda.id_fascicolo == id).first()
     if f and s:
         s.organo_corrente, s.numero_sentenza_corrente, s.massima_corrente = payload.organo, payload.numero, payload.massima
-        f.stato = models.StatoFascicolo.Validato
+        # Rinomina fisica file
+        data_p = payload.note_riservate.replace("/","-") if payload.note_riservate else "ND"
+        nuovo_nome = f"{payload.organo}_{payload.numero}_{data_p}.pdf".replace(" ","_").replace("/","-")
+        nuovo_path = os.path.join(UPLOAD_DIR, nuovo_nome)
+        if os.path.exists(f.file_originale): os.rename(f.file_originale, nuovo_path)
+        f.file_originale, f.stato = nuovo_path, models.StatoFascicolo.Validato
         db.commit()
     return {"ok": True}
 
