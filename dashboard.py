@@ -3,100 +3,115 @@ import requests
 import pandas as pd
 import os
 
-# Configurazione della pagina
+# --- CONFIGURAZIONE DINAMICA ---
+# Se il software gira sul Web (Render), userà l'URL del backend salvato nelle impostazioni.
+# Se gira sul tuo PC, userà l'indirizzo locale 127.0.0.1
+BACKEND_URL_ENV = os.getenv("BACKEND_URL", "http://127.0.0.1:9999")
+API_URL = BACKEND_URL_ENV.strip("/") # Rimuove eventuali barre finali
+
+# Configurazione Pagina
 st.set_page_config(page_title="Osservatorio ACDT", layout="wide", page_icon="⚖️")
 
-# Indirizzo del server Backend (assicurati che main.py giri sulla porta 9999)
-API_URL = "http://127.0.0.1:9999"
+st.title("⚖️ Osservatorio Giurisprudenza Tributaria")
 
-st.title("⚖️ Osservatorio ACDT - Revisione Sentenze")
+# --- SIDEBAR: CARICAMENTO ---
+st.sidebar.header("📥 Caricamento Sentenza")
+u_file = st.sidebar.file_uploader("Seleziona il PDF della sentenza", type="pdf")
+
+if st.sidebar.button("Invia all'IA"):
+    if u_file:
+        try:
+            files = {"file": (u_file.name, u_file.getvalue(), "application/pdf")}
+            with st.sidebar.status("Invio in corso..."):
+                r = requests.post(f"{API_URL}/v1/fascicoli/upload", files=files)
+            if r.status_code == 200:
+                st.sidebar.success("File caricato! Attendi l'analisi e ricarica.")
+                st.rerun()
+            else:
+                st.sidebar.error(f"Errore server: {r.status_code}")
+        except Exception as e:
+            st.sidebar.error(f"Errore di connessione: {e}")
+    else:
+        st.sidebar.error("Seleziona prima un file!")
 
 # --- RECUPERO DATI DAL DATABASE ---
 try:
     res = requests.get(f"{API_URL}/v1/fascicoli")
-    dati_json = res.json() if res.status_code == 200 else []
-except:
-    dati_json = []
-
-# --- SIDEBAR: CARICAMENTO NUOVI FILE ---
-st.sidebar.header("Nuovo File")
-u_file = st.sidebar.file_uploader("Carica un PDF della sentenza", type="pdf")
-if st.sidebar.button("Invia all'IA"):
-    if u_file:
-        files = {"file": (u_file.name, u_file.getvalue(), "application/pdf")}
-        requests.post(f"{API_URL}/v1/fascicoli/upload", files=files)
-        st.sidebar.success("File caricato con successo! Ricarica la pagina.")
-        st.rerun()
+    if res.status_code == 200:
+        dati_json = res.json()
     else:
-        st.sidebar.error("Per favore, seleziona un file PDF.")
+        dati_json = []
+except Exception as e:
+    st.error(f"⚠️ Impossibile connettersi al Backend all'indirizzo: {API_URL}")
+    st.info("Controlla le variabili d'ambiente su Render (BACKEND_URL).")
+    dati_json = []
 
 # --- INTERFACCIA PRINCIPALE ---
 if not dati_json:
-    st.info("In attesa di documenti nel database... Carica un PDF dalla barra laterale per iniziare.")
+    st.info("👋 Benvenuto! Al momento non ci sono documenti nel database. Carica il primo PDF dalla barra laterale.")
 else:
-    # Mostra tabella riassuntiva dei file caricati
+    # Mostra la tabella dei fascicoli
     df = pd.DataFrame(dati_json)
-    st.subheader(f"Elenco Fascicoli nel Sistema ({len(dati_json)})")
-    st.dataframe(df[["id", "stato", "data_caricamento"]], width=1200)
+    st.subheader(f"Elenco Documenti ({len(dati_json)})")
+    # Nota: su versioni recenti di Streamlit 'use_container_width' è preferibile
+    st.dataframe(df[["id", "stato", "data_caricamento"]], use_container_width=True)
 
     st.divider()
 
-    # --- SEZIONE REVISIONE E VALIDAZIONE ---
-    st.subheader("🔍 Dettagli Fascicolo e Validazione")
+    # --- SEZIONE REVISIONE ---
+    st.subheader("🔍 Revisione e Validazione")
     
-    # Menu a tendina per selezionare il fascicolo
+    # Selezione tramite ID
     opzioni_id = [f["id"] for f in dati_json]
-    id_scelto = st.selectbox("Seleziona un ID Fascicolo per revisionare i dati", opzioni_id)
+    id_scelto = st.selectbox("Seleziona l'ID del fascicolo per vedere i dettagli", opzioni_id)
 
     if id_scelto:
-        # 1. Recupero informazioni sul file per il link al PDF
-        fascicolo_scelto = next(f for f in dati_json if f["id"] == id_scelto)
-        # Estraiamo solo il nome del file dal percorso salvato nel DB
-        nome_file_fisico = os.path.basename(fascicolo_scelto['file_originale'])
+        # Troviamo il percorso del file per il pulsante visualizza
+        fascicolo_info = next(f for f in dati_json if f["id"] == id_scelto)
+        nome_file_fisico = os.path.basename(fascicolo_info['file_originale'])
         url_pdf = f"{API_URL}/storage/{nome_file_fisico}"
 
-        # 2. Recupero della scheda generata dall'IA
+        # Recuperiamo la scheda dal server
         s_res = requests.get(f"{API_URL}/v1/fascicoli/{id_scelto}/scheda")
         
         if s_res.status_code == 200:
             scheda = s_res.json()
-            if scheda:
+            
+            if not scheda:
+                st.warning("⏳ L'IA sta ancora analizzando il documento. Attendi qualche istante e rinfresca la pagina.")
+            else:
                 col1, col2 = st.columns(2)
                 
                 with col1:
                     st.info("### 🤖 Dati estratti dall'IA")
-                    
-                    # PULSANTE PER APRIRE IL PDF IN UNA NUOVA SCHEDA
                     st.link_button("📄 VISUALIZZA PDF ORIGINALE", url_pdf)
                     
-                    st.write(f"**Organo Rilevato:** {scheda.get('organo_ai', 'N/D')}")
-                    st.write(f"**Numero Sentenza:** {scheda.get('numero_sentenza_ai', 'N/D')}")
+                    st.write(f"**Organo Suggerito:** {scheda.get('organo_ai', 'N/D')}")
+                    st.write(f"**Numero Suggerito:** {scheda.get('numero_sentenza_ai', 'N/D')}")
                     st.write("**Descrizione / Massima (Bozza AI):**")
-                    st.markdown(f"> {scheda.get('massima_ai', 'Testo non rilevato')}")
+                    st.markdown(f"> {scheda.get('massima_ai', 'Analisi in corso...')}")
                 
                 with col2:
                     st.success("### ✅ Validazione Ufficiale")
-                    st.write("Modifica i campi qui sotto e clicca salva per ufficializzare i dati e rinominare il file.")
+                    v_org = st.text_input("Conferma Organo", value=scheda.get('organo_ai') or "")
+                    v_num = st.text_input("Conferma Numero", value=scheda.get('numero_sentenza_ai') or "")
+                    v_max = st.text_area("Revisione Massima / Descrizione", value=scheda.get('massima_ai') or "", height=300)
                     
-                    v_org = st.text_input("Organo Ufficiale", value=scheda.get('organo_ai') or "")
-                    v_num = st.text_input("Numero Sentenza Ufficiale", value=scheda.get('numero_sentenza_ai') or "")
-                    v_max = st.text_area("Descrizione / Massima Definitiva", value=scheda.get('massima_ai') or "", height=350)
-                    
-                    if st.button("SALVA VALIDAZIONE E RINOMINA FILE"):
+                    if st.button("SALVA E RINOMINA FILE"):
                         payload = {
                             "organo": v_org,
                             "numero_sentenza": v_num,
                             "massima": v_max
                         }
-                        v_res = requests.patch(f"{API_URL}/v1/fascicoli/{id_scelto}/validate", json=payload)
-                        if v_res.status_code == 200:
-                            st.balloons()
-                            st.success("Validazione completata! Il file è stato rinominato correttamente in archivio.")
-                            # Ricarica la pagina per aggiornare i nomi dei file nella tabella
-                            st.rerun()
-                        else:
-                            st.error(f"Errore durante la validazione: {v_res.text}")
-            else:
-                st.warning("L'IA sta ancora analizzando questo file... Attendi qualche secondo e rinfresca la pagina.")
+                        try:
+                            v_res = requests.patch(f"{API_URL}/v1/fascicoli/{id_scelto}/validate", json=payload)
+                            if v_res.status_code == 200:
+                                st.balloons()
+                                st.success("Documento validato e file rinominato correttamente!")
+                                st.rerun()
+                            else:
+                                st.error(f"Errore nella validazione: {v_res.text}")
+                        except Exception as e:
+                            st.error(f"Errore tecnico: {e}")
         else:
-            st.error("Non è stato possibile recuperare la scheda per questo fascicolo.")
+            st.error("Impossibile recuperare i dettagli della scheda AI.")
