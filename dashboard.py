@@ -3,25 +3,27 @@ import requests
 import pandas as pd
 import os
 
-# --- CONFIGURAZIONE URL ---
-# Usiamo una logica robusta: se BACKEND_URL è impostato su Render, usa quello.
-# Altrimenti usa quello del tuo PC.
-BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:9999")
-API_URL = BACKEND_URL.strip("/")
-
 st.set_page_config(page_title="Osservatorio ACDT", layout="wide")
+
+# --- FORZATURA INDIRIZZO ---
+# Sostituisci il link qui sotto con quello del tuo backend (quello che finisce con .onrender.com)
+API_URL = "https://osservatorio-dashboard.onrender.com/" 
 
 st.title("⚖️ Osservatorio Giurisprudenza Tributaria")
 
+# Visualizziamo l'URL a video per essere sicuri che il software stia usando quello giusto
+st.sidebar.write(f"Connesso a: {API_URL}")
+
 # --- RECUPERO DATI ---
+dati_json = []
 try:
     res = requests.get(f"{API_URL}/v1/fascicoli", timeout=10)
-    dati_json = res.json() if res.status_code == 200 else []
+    if res.status_code == 200:
+        dati_json = res.json()
 except Exception as e:
-    st.error(f"Errore di collegamento al server: {e}")
-    dati_json = []
+    st.error(f"Errore di connessione al server: {e}")
 
-# --- SIDEBAR ---
+# --- SIDEBAR: CARICAMENTO ---
 st.sidebar.header("Carica PDF")
 u_file = st.sidebar.file_uploader("Scegli file", type="pdf")
 if st.sidebar.button("Invia all'IA"):
@@ -37,36 +39,31 @@ if st.sidebar.button("Invia all'IA"):
         except Exception as e:
             st.sidebar.error(f"Errore: {e}")
 
-# --- MAIN UI ---
-if not dati_json:
-    st.info("In attesa di documenti...")
-else:
+# --- TABELLA E DETTAGLI ---
+if dati_json:
     df = pd.DataFrame(dati_json)
     st.dataframe(df[["id", "stato", "data_caricamento"]], use_container_width=True)
     
     st.divider()
-    
-    id_list = [f["id"] for f in dati_json]
-    id_scelto = st.selectbox("Seleziona ID", id_list)
+    id_scelto = st.selectbox("Seleziona ID", [f["id"] for f in dati_json])
     
     if id_scelto:
-        try:
-            s_res = requests.get(f"{API_URL}/v1/fascicoli/{id_scelto}/scheda", timeout=10)
-            if s_res.status_code == 200:
-                scheda = s_res.json()
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.info("### Dati IA")
-                    st.write(f"**Organo:** {scheda.get('organo_ai', 'N/D')}")
-                    st.write(f"**Massima:** {scheda.get('massima_ai', 'N/D')}")
-                with col2:
-                    st.success("### Validazione")
-                    v_org = st.text_input("Organo", value=scheda.get('organo_ai', ''))
-                    v_max = st.text_area("Massima", value=scheda.get('massima_ai', ''), height=200)
-                    if st.button("SALVA"):
-                        payload = {"organo": v_org, "massima": v_max}
-                        requests.patch(f"{API_URL}/v1/fascicoli/{id_scelto}/validate", json=payload, timeout=10)
-                        st.success("Salvato!")
-                        st.rerun()
-        except Exception as e:
-            st.error(f"Errore nel recupero della scheda: {e}")
+        s_res = requests.get(f"{API_URL}/v1/fascicoli/{id_scelto}/scheda")
+        if s_res.status_code == 200:
+            scheda = s_res.json()
+            col1, col2 = st.columns(2)
+            with col1:
+                st.info("### Dati IA")
+                st.write(f"**Organo:** {scheda.get('organo_ai')}")
+                st.write(f"**Massima:** {scheda.get('massima_ai')}")
+            with col2:
+                st.success("### Validazione")
+                v_org = st.text_input("Organo", value=scheda.get('organo_ai'))
+                v_max = st.text_area("Massima", value=scheda.get('massima_ai'), height=200)
+                if st.button("SALVA"):
+                    p = {"organo": v_org, "massima": v_max}
+                    requests.patch(f"{API_URL}/v1/fascicoli/{id_scelto}/validate", json=p)
+                    st.success("Salvato!")
+                    st.rerun()
+else:
+    st.info("Nessun documento trovato. Carica un file.")
