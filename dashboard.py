@@ -1,145 +1,72 @@
-from fastapi import FastAPI, Depends, UploadFile, File, BackgroundTasks, HTTPException
-from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
-from typing import List
-import shutil
-import uuid
+import streamlit as st
+import requests
+import pandas as pd
 import os
-import fitz # PyMuPDF
 
-# Import moduli locali
-import models, schemas, database
+# --- CONFIGURAZIONE ---
+# Recupera l'URL del backend dalle impostazioni di Render
+API_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:9999").strip("/")
+HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-# Inizializzazione Tabelle Database
-models.Base.metadata.create_all(bind=database.engine)
+st.set_page_config(page_title="Osservatorio ACDT", layout="wide", page_icon="⚖️")
 
-app = FastAPI(title="Osservatorio ACDT - API")
+st.title("⚖️ Osservatorio Giurisprudenza Tributaria")
 
-# --- CONFIGURAZIONE CORS (Risolve Errore 403) ---
-# Permette alla Dashboard di comunicare con il Backend sul web
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], # In produzione su Render mettiamo "*" per semplicità
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# --- SIDEBAR: CARICAMENTO ---
+st.sidebar.header("📥 Caricamento Sentenza")
+u_file = st.sidebar.file_uploader("Seleziona il PDF", type="pdf")
 
-# Configurazione Cartella Storage
-UPLOAD_DIR = "storage"
-if not os.path.exists(UPLOAD_DIR):
-    os.makedirs(UPLOAD_DIR)
+if st.sidebar.button("Invia all'IA"):
+    if u_file:
+        try:
+            files = {"file": (u_file.name, u_file.getvalue(), "application/pdf")}
+            r = requests.post(f"{API_URL}/v1/fascicoli/upload", files=files, headers=HEADERS, timeout=30)
+            if r.status_code == 200:
+                st.sidebar.success("Caricato! Ricarica la pagina.")
+                st.rerun()
+            else:
+                st.sidebar.error(f"Errore server: {r.status_code}")
+        except Exception as e:
+            st.sidebar.error(f"Errore connessione: {e}")
 
-# Mount della cartella per visualizzare i PDF
-app.mount("/storage", StaticFiles(directory="storage"), name="storage")
+# --- RECUPERO DATI DAL BACKEND ---
+dati_json = []
+try:
+    res = requests.get(f"{API_URL}/v1/fascicoli", headers=HEADERS, timeout=15)
+    if res.status_code == 200:
+        dati_json = res.json()
+except:
+    dati_json = []
 
-# --- FUNZIONE ANALISI AI IN BACKGROUND ---
-def analizza_sentenza_ai(id_fascicolo: str, file_path: str):
-    db = database.SessionLocal()
-    try:
-        print(f"--- AVVIO ANALISI FILE: {file_path} ---")
-        doc = fitz.open(file_path)
-        testo_estratto = ""
-        for pagina in doc.pages(0, 2):
-            testo_estratto += pagina.get_text()
-        doc.close()
+# --- INTERFACCIA ---
+if not dati_json:
+    st.info("👋 Benvenuto! Carica un PDF per iniziare.")
+else:
+    df = pd.DataFrame(dati_json)
+    st.subheader(f"Elenco Documenti ({len(dati_json)})")
+    st.dataframe(df[["id", "stato", "data_caricamento"]], use_container_width=True)
 
-        testo_pulito = testo_estratto.strip()
-        descrizione = testo_pulito[:2000] if len(testo_pulito) > 10 else "ATTENZIONE: PDF senza testo leggibile (scansione immagine)."
+    st.divider()
 
-        nuova_scheda = models.Scheda(
-            id_fascicolo=id_fascicolo,
-            organo_ai="CGT Veneto" if "Veneto" in testo_estratto else "CGT Sconosciuta",
-            numero_sentenza_ai="Da rilevare",
-            massima_ai=descrizione,
-            punteggio_confidenza=0.75
-        )
-        db.add(nuova_scheda)
-        
-        fascicolo = db.query(models.Fascicolo).filter(models.Fascicolo.id == id_fascicolo).first()
-        if fascicolo:
-            fascicolo.stato = models.StatoFascicolo.Da_validare
-        
-        db.commit()
-        print(f"--- ANALISI COMPLETATA PER: {id_fascicolo} ---")
-    except Exception as e:
-        print(f"--- ERRORE ANALISI AI: {e} ---")
-        db.rollback()
-    finally:
-        db.close()
+    id_list = [f["id"] for f in dati_json]
+    id_scelto = st.selectbox("Seleziona ID Fascicolo", id_list)
 
-# --- ENDPOINT API ---
-
-@app.get("/")
-def home():
-    # Health check per Render
-    return {"status": "Online", "msg": "Benvenuto nell'Osservatorio ACDT"}
-
-@app.post("/v1/fascicoli/upload", response_model=schemas.FascicoloBase)
-async def upload_documento(background_tasks: BackgroundTasks, file: UploadFile = File(...), db: Session = Depends(database.get_db)):
-    f_id = str(uuid.uuid4())
-    f_path = os.path.join(UPLOAD_DIR, f"{f_id}.pdf")
-    
-    with open(f_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-    
-    nuovo_fascicolo = models.Fascicolo(
-        id=f_id, 
-        file_originale=f_path, 
-        stato=models.StatoFascicolo.In_estrazione
-    )
-    db.add(nuovo_fascicolo)
-    db.commit()
-    db.refresh(nuovo_fascicolo)
-    
-    background_tasks.add_task(analizza_sentenza_ai, nuovo_fascicolo.id, f_path)
-    return nuovo_fascicolo
-
-@app.get("/v1/fascicoli", response_model=List[schemas.FascicoloBase])
-def leggi_fascicoli(db: Session = Depends(database.get_db)):
-    return db.query(models.Fascicolo).all()
-
-@app.get("/v1/fascicoli/{id}/scheda")
-def leggi_scheda(id: uuid.UUID, db: Session = Depends(database.get_db)):
-    scheda = db.query(models.Scheda).filter(models.Scheda.id_fascicolo == id).first()
-    if not scheda:
-        raise HTTPException(status_code=404, detail="Scheda non trovata")
-    return scheda
-
-@app.patch("/v1/fascicoli/{id}/validate")
-def valida_sentenza(id: uuid.UUID, payload: schemas.ValidazioneInput, db: Session = Depends(database.get_db)):
-    fascicolo = db.query(models.Fascicolo).filter(models.Fascicolo.id == id).first()
-    scheda = db.query(models.Scheda).filter(models.Scheda.id_fascicolo == id).first()
-    
-    if not fascicolo or not scheda:
-        raise HTTPException(status_code=404, detail="Non trovato")
-    
-    scheda.organo_corrente = payload.organo or scheda.organo_ai
-    scheda.numero_sentenza_corrente = payload.numero_sentenza or scheda.numero_sentenza_ai
-    scheda.massima_corrente = payload.massima or scheda.massima_ai
-    
-    # Rinomina file
-    try:
-        org_p = scheda.organo_corrente.replace(" ", "_").replace("/", "-").replace("\\", "-")
-        num_p = scheda.numero_sentenza_corrente.replace(" ", "_").replace("/", "-").replace("\\", "-")
-        nuovo_nome = f"{org_p}_{num_p}.pdf"
-        nuovo_path = os.path.join(UPLOAD_DIR, nuovo_nome)
-        
-        if os.path.exists(fascicolo.file_originale):
-            os.rename(fascicolo.file_originale, nuovo_path)
-            fascicolo.file_originale = nuovo_path
-    except Exception as e:
-        print(f"Errore rinomina: {e}")
-
-    fascicolo.stato = models.StatoFascicolo.Validato
-    db.commit()
-    return {"status": "OK"}
-
-# --- AVVIO SERVER ---
-if __name__ == "__main__":
-    import uvicorn
-    import os
-    # Legge la porta assegnata da Render o usa la 10000
-    port = int(os.environ.get("PORT", 10000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    if id_scelto:
+        # Recupero della scheda (sempre tramite Backend)
+        s_res = requests.get(f"{API_URL}/v1/fascicoli/{id_scelto}/scheda", headers=HEADERS)
+        if s_res.status_code == 200:
+            scheda = s_res.json()
+            col1, col2 = st.columns(2)
+            with col1:
+                st.info("### 🤖 Dati IA")
+                st.write(f"**Organo:** {scheda.get('organo_ai')}")
+                st.write(f"**Massima:** {scheda.get('massima_ai')}")
+            with col2:
+                st.success("### ✅ Validazione")
+                v_org = st.text_input("Organo", value=scheda.get('organo_ai'))
+                v_max = st.text_area("Massima", value=scheda.get('massima_ai'), height=300)
+                if st.button("SALVA"):
+                    p = {"organo": v_org, "massima": v_max}
+                    requests.patch(f"{API_URL}/v1/fascicoli/{id_scelto}/validate", json=p, headers=HEADERS)
+                    st.success("Salvato!")
+                    st.rerun()
