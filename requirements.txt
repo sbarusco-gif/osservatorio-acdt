@@ -8,3 +8,6 @@ requests
 pandas
 openai
 python-dotenv
+streamlit
+watchdog
+altair
