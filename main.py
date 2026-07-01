@@ -147,8 +147,11 @@ def cerca_simile(testo_ricerca: str, db: Session = Depends(database.get_db)):
     # Ricerca testuale semplice nelle massime validate
     return db.query(models.Scheda).filter(models.Scheda.massima_corrente.contains(testo_ricerca)).all()
 
-# --- AVVIO SERVER ---
+# --- AVVIO SERVER (Modificato per il Cloud) ---
 if __name__ == "__main__":
     import uvicorn
-    # Avvio sulla porta 9999 per evitare conflitti Windows
-    uvicorn.run(app, host="127.0.0.1", port=9999)
+    import os
+    # Render assegna automaticamente una porta, noi la leggiamo. 
+    # Se non la trova (tipo sul tuo PC), usa la 8000.
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
