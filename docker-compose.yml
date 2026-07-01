@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  # Questo è il cuore del database
+  db-osservatorio:
+    image: ankane/pgvector:latest  # Versione speciale di Postgres che supporta l'IA
+    container_name: acdt_database
+    restart: always
+    environment:
+      POSTGRES_DB: osservatorio_db
+      POSTGRES_USER: admin_acdt
+      POSTGRES_PASSWORD: password_segreta_123 # Cambiala in seguito
+    ports:
+      - "5432:5432" # Collega la porta del database al tuo PC
+    volumes:
+      - acdt_data:/var/lib/postgresql/data
+
+volumes:
+  acdt_data: # Questo assicura che i dati non spariscano quando spegni il PC
