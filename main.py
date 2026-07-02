@@ -11,7 +11,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 import models, schemas, database
 
-# Inizializzazione Database
 models.Base.metadata.create_all(bind=database.engine)
 
 app = FastAPI(title="Osservatorio ACDT - Massimario PRO")
@@ -30,73 +29,80 @@ if not os.path.exists(UPLOAD_DIR):
 
 app.mount("/storage", StaticFiles(directory="storage"), name="storage")
 
-# --- FUNZIONE IA MASSIMARIO (ESEGUITA SUBITO) ---
-def analizza_sentenza_diretta(id_fascicolo: str, file_path: str):
+# --- MOTORE DI ANALISI GIURIDICA ---
+def analizza_sentenza_tecnica(id_fascicolo: str, file_path: str):
     db = database.SessionLocal()
     api_key = os.getenv("OPENAI_API_KEY")
     
     try:
-        print(f"--- [STEP 1] APERTURA FILE: {file_path} ---")
+        # 1. LETTURA PDF
         doc = fitz.open(file_path)
         testo_estratto = ""
-        for pagina in doc.pages(0, 5): # Leggiamo le prime 6 pagine
-            testo_estratto += pagina.get_text()
+        # Leggiamo le prime 10 pagine per avere una visione completa
+        for pagina in doc.pages(0, min(10, len(doc))):
+            testo_estratto += pagina.get_text("text")
         doc.close()
 
-        print(f"--- [STEP 2] TESTO ESTRATTO (Primi 200 car.): {testo_estratto[:200]} ---")
-
-        if len(testo_estratto.strip()) < 50:
-            raise ValueError("Il PDF non contiene testo (forse è una scansione immagine).")
+        # 2. CONTROLLO PDF (È UN'IMMAGINE?)
+        if len(testo_estratto.strip()) < 100:
+            raise ValueError("DOCUMENTO NON LEGGIBILE: Il PDF è una scansione o una foto. L'IA non può leggere il testo se non è un PDF testuale.")
 
         if not api_key:
-            raise ValueError("Manca la variabile OPENAI_API_KEY su Render.")
+            raise ValueError("CONFIGURAZIONE MANCANTE: Manca la OPENAI_API_KEY nelle impostazioni di Render.")
 
-        print("--- [STEP 3] CHIAMATA OPENAI ---")
+        # 3. CHIAMATA A OPENAI CON PROMPT GIURIDICO
         client = openai.OpenAI(api_key=api_key)
         
         prompt_sistema = """
-        Sei un Magistrato dell'Ufficio del Massimario. 
-        Analizza la sentenza ed estrai i dati tecnici ESCLUSIVAMENTE in JSON.
-        REGOLE PER LA MASSIMA:
-        - Deve essere un principio di diritto astratto (In tema di..., il principio stabilisce che...).
-        - NON copiare il testo della sentenza.
-        - NON usare nomi di persone.
+        Sei un Magistrato Tributarista dell'Ufficio del Massimario. 
+        Analizza la sentenza ed estrai i dati ESCLUSIVAMENTE in formato JSON.
+        
+        REGOLE PER LA MASSIMA TECNICA:
+        - Deve essere un principio di diritto ASTRATTO e UNIVERSALE.
+        - Inizia con 'In tema di [Argomento]...'.
+        - NON usare nomi di persone o società (usa: 'il contribuente', 'l'Amministrazione').
+        - NON copiare frasi della sentenza, devi sintetizzare la RATIO DECIDENDI.
         """
         
+        prompt_utente = f"""
+        Estrai organo, numero sentenza, data deposito e massima tecnica da questo testo:
+        
+        {testo_estratto[:15000]}
+        """
+
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": prompt_sistema},
-                {"role": "user", "content": f"Sentenza:\n{testo_estratto[:15000]}"}
+                {"role": "user", "content": prompt_utente}
             ],
             response_format={ "type": "json_object" }
         )
         
         dati = json.loads(response.choices[0].message.content)
-        print(f"--- [STEP 4] RISPOSTA IA: {dati} ---")
 
-        # Salvataggio dati IA
+        # 4. SALVATAGGIO DATI
         nuova_scheda = models.Scheda(
             id_fascicolo=id_fascicolo,
             organo_ai=dati.get("organo", "Non rilevato"),
             numero_sentenza_ai=dati.get("numero", "N/D"),
-            massima_ai=dati.get("massima", "Errore generazione massima"),
-            note_riservate=f"Data: {dati.get('data')} | Norme: {dati.get('norme')}",
-            punteggio_confidenza=0.98
+            massima_ai=dati.get("massima", "Errore nella generazione della massima"),
+            note_riservate=f"Data: {dati.get('data', 'N/D')} | Norme: {dati.get('norme', 'N/D')}"
         )
         db.add(nuova_scheda)
         
-        # Cambiamo stato
         f = db.query(models.Fascicolo).filter(models.Fascicolo.id == id_fascicolo).first()
         if f: f.stato = models.StatoFascicolo.Da_validare
         
         db.commit()
-        print("--- [STEP 5] TUTTO SALVATO CORRETTAMENTE ---")
 
     except Exception as e:
-        print(f"--- [ERRORE] {str(e)} ---")
-        # Salviamo l'errore nella massima così l'utente lo vede nella dashboard
-        db.add(models.Scheda(id_fascicolo=id_fascicolo, massima_ai=f"ERRORE: {str(e)}"))
+        # SALVATAGGIO ERRORE (Così lo vedi nella Dashboard)
+        db.add(models.Scheda(
+            id_fascicolo=id_fascicolo, 
+            organo_ai="ERRORE SISTEMA", 
+            massima_ai=f"L'analisi è fallita. Motivo: {str(e)}"
+        ))
         db.commit()
     finally:
         db.close()
@@ -107,21 +113,14 @@ def analizza_sentenza_diretta(id_fascicolo: str, file_path: str):
 async def upload(background_tasks: BackgroundTasks, file: UploadFile = File(...), db: Session = Depends(database.get_db)):
     f_id = str(uuid.uuid4())
     f_path = os.path.join(UPLOAD_DIR, f"{f_id}.pdf")
-    with open(f_path, "wb") as b:
-        shutil.copyfileobj(file.file, b)
-    
+    with open(f_path, "wb") as b: shutil.copyfileobj(file.file, b)
     n = models.Fascicolo(id=f_id, file_originale=f_path, stato=models.StatoFascicolo.In_estrazione)
-    db.add(n)
-    db.commit()
-    db.refresh(n)
-    
-    # Eseguiamo l'analisi
-    background_tasks.add_task(analizza_sentenza_diretta, n.id, f_path)
+    db.add(n); db.commit(); db.refresh(n)
+    background_tasks.add_task(analizza_sentenza_tecnica, n.id, f_path)
     return n
 
 @app.get("/v1/fascicoli")
-def list_f(db: Session = Depends(database.get_db)):
-    return db.query(models.Fascicolo).all()
+def list_f(db: Session = Depends(database.get_db)): return db.query(models.Fascicolo).all()
 
 @app.get("/v1/fascicoli/{id}/scheda")
 def get_s(id: uuid.UUID, db: Session = Depends(database.get_db)): 
@@ -144,7 +143,3 @@ def get_arch(db: Session = Depends(database.get_db)):
 
 @app.get("/")
 def health(): return {"status": "ok"}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
