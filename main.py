@@ -2,7 +2,7 @@ import os
 import uuid
 import shutil
 import json
-import fitz  # PyMuPDF
+import fitz
 import openai
 from typing import List
 from fastapi import FastAPI, Depends, UploadFile, File, BackgroundTasks, HTTPException
@@ -11,9 +11,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 import models, schemas, database
 
-app = FastAPI(title="Osservatorio ACDT - v5")
+app = FastAPI(title="Osservatorio ACDT - v6")
 
-# --- CONFIGURAZIONE CORS ---
+# 1. ABILITAZIONE CORS (Immediata)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,35 +22,42 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Creazione tabelle all'avvio senza bloccare il server
-@app.on_event("startup")
-def startup_event():
-    models.Base.metadata.create_all(bind=database.engine)
-
+# 2. CARTELLE E MOUNT (Immediati)
 UPLOAD_DIR = "storage"
 if not os.path.exists(UPLOAD_DIR):
     os.makedirs(UPLOAD_DIR)
-
 app.mount("/storage", StaticFiles(directory="storage"), name="storage")
 
-# --- FUNZIONE IA MASSIMARIO ---
+# 3. AVVIO RITARDATO DATABASE (Non blocca la porta 10000)
+@app.on_event("startup")
+def startup_db():
+    try:
+        models.Base.metadata.create_all(bind=database.engine)
+        print("DATABASE: Tabelle create con successo.")
+    except Exception as e:
+        print(f"DATABASE ERROR: {e} (Il database potrebbe essere in sleep)")
+
+# --- FUNZIONE IA PROFESSIONALE ---
 def analizza_sentenza_ai(id_fascicolo: str, file_path: str):
     db = database.SessionLocal()
     api_key = os.getenv("OPENAI_API_KEY")
     try:
         doc = fitz.open(file_path)
-        testo = "".join([p.get_text() for p in doc.pages(0, 6)])
+        testo = "".join([p.get_text() for p in doc.pages(0, 7)])
         doc.close()
 
-        if not api_key: return
+        if not api_key or len(testo) < 100:
+            raise ValueError("Testo assente o Chiave API mancante")
 
         client = openai.OpenAI(api_key=api_key)
-        prompt = """Agisci come l'Ufficio del Massimario. Estrai in JSON: 
-        'organo', 'numero', 'data' (GG-MM-AAAA), 'massima' (Tecnica e astratta), 'norme'."""
+        prompt = """Sei l'Ufficio del Massimario della Corte di Giustizia Tributaria. 
+        Analizza ed estrai ESCLUSIVAMENTE in JSON:
+        'organo' (Corte completa), 'numero' (es. 123/2024), 'data' (GG-MM-AAAA), 
+        'massima' (Tecnica, astratta, linguaggio formale), 'norme' (Articoli citati)."""
         
         response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role": "system", "content": prompt}, {"role": "user", "content": testo[:12000]}],
+            messages=[{"role": "system", "content": prompt}, {"role": "user", "content": testo[:15000]}],
             response_format={ "type": "json_object" }
         )
         dati = json.loads(response.choices[0].message.content)
@@ -67,13 +74,15 @@ def analizza_sentenza_ai(id_fascicolo: str, file_path: str):
         if f: f.stato = models.StatoFascicolo.Da_validare
         db.commit()
     except Exception as e:
-        print(f"Errore IA: {e}")
+        print(f"ERRORE IA: {e}")
+        db.add(models.Scheda(id_fascicolo=id_fascicolo, massima_ai=f"Analisi fallita. Riprova. Errore: {e}"))
+        db.commit()
     finally:
         db.close()
 
 # --- ENDPOINTS ---
 @app.get("/")
-def health(): return {"status": "ok"}
+def health(): return {"status": "ok"} # Risponde subito a Render
 
 @app.post("/v1/fascicoli/upload")
 async def upload(background_tasks: BackgroundTasks, file: UploadFile = File(...), db: Session = Depends(database.get_db)):
@@ -89,26 +98,4 @@ async def upload(background_tasks: BackgroundTasks, file: UploadFile = File(...)
 def list_f(db: Session = Depends(database.get_db)): return db.query(models.Fascicolo).all()
 
 @app.get("/v1/fascicoli/{id}/scheda")
-def get_s(id: uuid.UUID, db: Session = Depends(database.get_db)): 
-    return db.query(models.Scheda).filter(models.Scheda.id_fascicolo == id).first()
-
-@app.get("/v1/archivio")
-def get_arch(db: Session = Depends(database.get_db)):
-    query = db.query(models.Scheda, models.Fascicolo).join(models.Fascicolo).filter(models.Fascicolo.stato == models.StatoFascicolo.Validato).all()
-    return [{"organo": s.organo_corrente, "numero": s.numero_sentenza_corrente, "massima": s.massima_corrente, "file_url": f"/storage/{os.path.basename(f.file_originale)}"} for s, f in query]
-
-@app.patch("/v1/fascicoli/{id}/validate")
-def validate(id: uuid.UUID, payload: schemas.ValidazioneInput, db: Session = Depends(database.get_db)):
-    f = db.query(models.Fascicolo).filter(models.Fascicolo.id == id).first()
-    s = db.query(models.Scheda).filter(models.Scheda.id_fascicolo == id).first()
-    if f and s:
-        s.organo_corrente, s.numero_sentenza_corrente, s.massima_corrente = payload.organo, payload.numero, payload.massima
-        f.stato = models.StatoFascicolo.Validato
-        db.commit()
-    return {"ok": True}
-
-if __name__ == "__main__":
-    import uvicorn
-    # Forza la porta 10000 che Render si aspetta
-    port = int(os.environ.get("PORT", 10000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+def get_s(id: uuid.UUID, db: Session =
