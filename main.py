@@ -11,9 +11,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 import models, schemas, database
 
-app = FastAPI(title="Osservatorio ACDT - v6")
+app = FastAPI(title="ACDT Pro")
 
-# 1. ABILITAZIONE CORS (Immediata)
+# 1. CORS IMMEDIATO
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,42 +22,41 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 2. CARTELLE E MOUNT (Immediati)
+# 2. CARTELLE
 UPLOAD_DIR = "storage"
 if not os.path.exists(UPLOAD_DIR):
     os.makedirs(UPLOAD_DIR)
+
 app.mount("/storage", StaticFiles(directory="storage"), name="storage")
 
-# 3. AVVIO RITARDATO DATABASE (Non blocca la porta 10000)
-@app.on_event("startup")
-def startup_db():
+# 3. DATABASE: INIZIALIZZAZIONE SICURA
+@app.get("/")
+def health_check():
+    # Questo serve a svegliare il DB se è in sleep senza bloccare l'avvio
     try:
         models.Base.metadata.create_all(bind=database.engine)
-        print("DATABASE: Tabelle create con successo.")
-    except Exception as e:
-        print(f"DATABASE ERROR: {e} (Il database potrebbe essere in sleep)")
+        return {"status": "Online"}
+    except:
+        return {"status": "Database Initializing"}
 
-# --- FUNZIONE IA PROFESSIONALE ---
+# --- LOGICA IA ---
 def analizza_sentenza_ai(id_fascicolo: str, file_path: str):
     db = database.SessionLocal()
     api_key = os.getenv("OPENAI_API_KEY")
     try:
         doc = fitz.open(file_path)
-        testo = "".join([p.get_text() for p in doc.pages(0, 7)])
+        testo = "".join([p.get_text() for p in doc.pages(0, 5)])
         doc.close()
-
-        if not api_key or len(testo) < 100:
-            raise ValueError("Testo assente o Chiave API mancante")
-
+        
+        if not api_key: return
         client = openai.OpenAI(api_key=api_key)
-        prompt = """Sei l'Ufficio del Massimario della Corte di Giustizia Tributaria. 
-        Analizza ed estrai ESCLUSIVAMENTE in JSON:
-        'organo' (Corte completa), 'numero' (es. 123/2024), 'data' (GG-MM-AAAA), 
-        'massima' (Tecnica, astratta, linguaggio formale), 'norme' (Articoli citati)."""
+        
+        prompt = """Sei l'Ufficio del Massimario CGT. Estrai in JSON: 
+        'organo', 'numero', 'data' (GG-MM-AAAA), 'massima' (tecnica e astratta), 'norme'."""
         
         response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role": "system", "content": prompt}, {"role": "user", "content": testo[:15000]}],
+            messages=[{"role": "system", "content": prompt}, {"role": "user", "content": testo[:12000]}],
             response_format={ "type": "json_object" }
         )
         dati = json.loads(response.choices[0].message.content)
@@ -73,17 +72,10 @@ def analizza_sentenza_ai(id_fascicolo: str, file_path: str):
         f = db.query(models.Fascicolo).filter(models.Fascicolo.id == id_fascicolo).first()
         if f: f.stato = models.StatoFascicolo.Da_validare
         db.commit()
-    except Exception as e:
-        print(f"ERRORE IA: {e}")
-        db.add(models.Scheda(id_fascicolo=id_fascicolo, massima_ai=f"Analisi fallita. Riprova. Errore: {e}"))
-        db.commit()
-    finally:
-        db.close()
+    except Exception as e: print(f"Errore: {e}")
+    finally: db.close()
 
 # --- ENDPOINTS ---
-@app.get("/")
-def health(): return {"status": "ok"} # Risponde subito a Render
-
 @app.post("/v1/fascicoli/upload")
 async def upload(background_tasks: BackgroundTasks, file: UploadFile = File(...), db: Session = Depends(database.get_db)):
     f_id = str(uuid.uuid4())
@@ -98,4 +90,37 @@ async def upload(background_tasks: BackgroundTasks, file: UploadFile = File(...)
 def list_f(db: Session = Depends(database.get_db)): return db.query(models.Fascicolo).all()
 
 @app.get("/v1/fascicoli/{id}/scheda")
-def get_s(id: uuid.UUID, db: Session =
+def get_s(id: uuid.UUID, db: Session = Depends(database.get_db)): 
+    return db.query(models.Scheda).filter(models.Scheda.id_fascicolo == id).first()
+
+@app.get("/v1/ricerca/ai")
+def ricerca_ai(domanda: str, db: Session = Depends(database.get_db)):
+    schede = db.query(models.Scheda).join(models.Fascicolo).filter(models.Fascicolo.stato == models.StatoFascicolo.Validato).all()
+    # Ricerca rapida testuale
+    return [s for s in schede if domanda.lower() in s.massima_corrente.lower()][:10]
+
+@app.get("/v1/archivio")
+def get_arch(db: Session = Depends(database.get_db)):
+    query = db.query(models.Scheda, models.Fascicolo).join(models.Fascicolo).filter(models.Fascicolo.stato == models.StatoFascicolo.Validato).all()
+    return [{"organo": s.organo_corrente, "numero": s.numero_sentenza_corrente, "massima": s.massima_corrente, "file_url": f"/storage/{os.path.basename(f.file_originale)}"} for s, f in query]
+
+@app.patch("/v1/fascicoli/{id}/validate")
+def validate(id: uuid.UUID, payload: schemas.ValidazioneInput, db: Session = Depends(database.get_db)):
+    f = db.query(models.Fascicolo).filter(models.Fascicolo.id == id).first()
+    s = db.query(models.Scheda).filter(models.Scheda.id_fascicolo == id).first()
+    if f and s:
+        s.organo_corrente, s.numero_sentenza_corrente, s.massima_corrente = payload.organo, payload.numero, payload.massima
+        # Rinomina file fisica (Organo_Numero_Data)
+        d_p = str(payload.note_riservate).replace("/","-") if payload.note_riservate else "ND"
+        nuovo_nome = f"{payload.organo}_{payload.numero}_{d_p}.pdf".replace(" ","_").replace("/","-")
+        nuovo_path = os.path.join(UPLOAD_DIR, nuovo_nome)
+        if os.path.exists(f.file_originale): os.rename(f.file_originale, nuovo_path)
+        f.file_originale, f.stato = nuovo_path, models.StatoFascicolo.Validato
+        db.commit()
+    return {"ok": True}
+
+if __name__ == "__main__":
+    import uvicorn
+    # Render richiede l'avvio su 0.0.0.0
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
