@@ -11,9 +11,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 import models, schemas, database
 
+# Inizializzazione Database
 models.Base.metadata.create_all(bind=database.engine)
 
-app = FastAPI(title="Osservatorio ACDT - Massimario PRO")
+app = FastAPI(title="Osservatorio ACDT - v3")
 
 app.add_middleware(
     CORSMiddleware,
@@ -35,62 +36,46 @@ def analizza_sentenza_ai(id_fascicolo: str, file_path: str):
     api_key = os.getenv("OPENAI_API_KEY")
     
     try:
-        print(f"DEBUG: Avvio lettura file {file_path}")
         doc = fitz.open(file_path)
-        testo_estratto = ""
-        for pagina in doc.pages(0, 5):
-            testo_estratto += pagina.get_text()
+        testo = "".join([p.get_text() for p in doc.pages(0, 7)]) # Leggiamo fino a 8 pagine
         doc.close()
 
-        # CONTROLLO 1: Il testo esiste?
-        lunghezza_testo = len(testo_estratto.strip())
-        print(f"DEBUG: Testo estratto lunghezza: {lunghezza_testo} caratteri")
+        if len(testo.strip()) < 100:
+            raise ValueError("Il PDF non ha testo leggibile (scansione immagine).")
 
-        if lunghezza_testo < 100:
-            print("ERRORE: Il PDF sembra una scansione immagine. Testo assente.")
-            massima_fallimento = "ERRORE: PDF SCANNERIZZATO. L'IA non può leggere il testo. Caricare un PDF testuale o attivare modulo OCR."
-            nuova_scheda = models.Scheda(id_fascicolo=id_fascicolo, organo_ai="N/D", massima_ai=massima_fallimento)
-            db.add(nuova_scheda)
-            db.commit()
-            return
-
-        # CONTROLLO 2: La chiave API esiste?
         if not api_key:
-            print("ERRORE: Variabile OPENAI_API_KEY non trovata su Render.")
-            return
+            raise ValueError("Chiave API OpenAI mancante.")
 
-        print("DEBUG: Invio richiesta a OpenAI...")
         client = openai.OpenAI(api_key=api_key)
         
         prompt_sistema = """
-        Sei un Magistrato Tributarista esperto nel massimare sentenze. 
+        Agisci come l'Ufficio del Massimario della Corte di Giustizia Tributaria. 
         Analizza il testo ed estrai questi dati ESCLUSIVAMENTE in formato JSON:
-        - organo: Nome completo della Corte (es. Corte di Giustizia Tributaria di II Grado del Veneto).
-        - numero: Numero della sentenza e anno (es. 456/2024).
-        - data: Data della sentenza/deposito (formato GG-MM-AAAA).
-        - massima: Una massima tecnica giuridica. Deve essere un principio di diritto astratto, senza nomi di parti. Inizia con 'In tema di...'. 
-        - norme: Articoli di legge citati.
+        - organo: Nome completo della Corte giudicante.
+        - numero: Numero sentenza/anno (es. 123/2024).
+        - data: Data deposito sentenza (formato GG-MM-AAAA).
+        - massima: Una MASSIMA TECNICA GIURIDICA. Deve essere un principio astratto, universale, senza nomi di persone. Usa linguaggio formale.
+        - norme: Articoli di legge citati (es. Art. 13 D.Lgs 201/2011).
         """
         
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": prompt_sistema},
-                {"role": "user", "content": f"Testo sentenza:\n{testo_estratto[:15000]}"}
+                {"role": "user", "content": f"Testo sentenza:\n{testo[:15000]}"}
             ],
             response_format={ "type": "json_object" }
         )
         
-        dati_ia = json.loads(response.choices[0].message.content)
-        print(f"DEBUG: Risposta IA ricevuta: {dati_ia}")
+        dati = json.loads(response.choices[0].message.content)
 
-        # Salvataggio
+        # Salvataggio dati estratti
         nuova_scheda = models.Scheda(
             id_fascicolo=id_fascicolo,
-            organo_ai=dati_ia.get("organo"),
-            numero_sentenza_ai=dati_ia.get("numero"),
-            massima_ai=dati_ia.get("massima"),
-            note_riservate=f"Data: {dati_ia.get('data')} | Norme: {dati_ia.get('norme')}"
+            organo_ai=dati.get("organo", "Non rilevato"),
+            numero_sentenza_ai=dati.get("numero", "N/D"),
+            massima_ai=dati.get("massima", "Errore generazione massima"),
+            note_riservate=f"Data: {dati.get('data')} | Norme: {dati.get('norme')}"
         )
         db.add(nuova_scheda)
         
@@ -98,11 +83,12 @@ def analizza_sentenza_ai(id_fascicolo: str, file_path: str):
         if f: f.stato = models.StatoFascicolo.Da_validare
         
         db.commit()
-        print(f"SUCCESS: Analisi completata per {id_fascicolo}")
 
     except Exception as e:
-        print(f"CRITICAL ERROR: {str(e)}")
-        db.rollback()
+        print(f"ERRORE IA: {e}")
+        # In caso di errore, creiamo una scheda minima per non bloccare il sistema
+        db.add(models.Scheda(id_fascicolo=id_fascicolo, organo_ai="ERRORE", massima_ai=f"Analisi fallita: {str(e)}"))
+        db.commit()
     finally:
         db.close()
 
@@ -121,11 +107,14 @@ async def upload(background_tasks: BackgroundTasks, file: UploadFile = File(...)
     return n
 
 @app.get("/v1/fascicoli")
-def list_f(db: Session = Depends(database.get_db)): return db.query(models.Fascicolo).all()
+def list_f(db: Session = Depends(database.get_db)):
+    return db.query(models.Fascicolo).all()
 
 @app.get("/v1/fascicoli/{id}/scheda")
 def get_s(id: uuid.UUID, db: Session = Depends(database.get_db)): 
-    return db.query(models.Scheda).filter(models.Scheda.id_fascicolo == id).first()
+    scheda = db.query(models.Scheda).filter(models.Scheda.id_fascicolo == id).first()
+    if not scheda: raise HTTPException(status_code=404)
+    return scheda
 
 @app.patch("/v1/fascicoli/{id}/validate")
 def validate(id: uuid.UUID, payload: schemas.ValidazioneInput, db: Session = Depends(database.get_db)):
@@ -133,27 +122,14 @@ def validate(id: uuid.UUID, payload: schemas.ValidazioneInput, db: Session = Dep
     s = db.query(models.Scheda).filter(models.Scheda.id_fascicolo == id).first()
     if f and s:
         s.organo_corrente, s.numero_sentenza_corrente, s.massima_corrente = payload.organo, payload.numero, payload.massima
-        data_p = payload.note_riservate.replace("/","-") if payload.note_riservate else "ND"
-        nuovo_nome = f"{payload.organo}_{payload.numero}_{data_p}.pdf".replace(" ","_").replace("/","-")
-        nuovo_path = os.path.join(UPLOAD_DIR, nuovo_nome)
-        if os.path.exists(f.file_originale): os.rename(f.file_originale, nuovo_path)
-        f.file_originale, f.stato = nuovo_path, models.StatoFascicolo.Validato
+        f.stato = models.StatoFascicolo.Validato
         db.commit()
     return {"ok": True}
-
-@app.get("/v1/ricerca/ai")
-def ricerca_ai(domanda: str, db: Session = Depends(database.get_db)):
-    return db.query(models.Scheda).filter(models.Scheda.massima_corrente.ilike(f"%{domanda}%")).all()
 
 @app.get("/v1/archivio")
 def get_arch(db: Session = Depends(database.get_db)):
     data = db.query(models.Scheda).join(models.Fascicolo).filter(models.Fascicolo.stato == models.StatoFascicolo.Validato).all()
     res = []
     for s in data:
-        f = db.query(models.Fascicolo).filter(models.Fascicolo.id == s.id_fascicolo).first()
-        res.append({"organo": s.organo_corrente, "numero": s.numero_sentenza_corrente, "massima": s.massima_corrente, "file_url": f"/storage/{os.path.basename(f.file_originale)}" if f else ""})
+        res.append({"organo": s.organo_corrente, "numero": s.numero_sentenza_corrente, "massima": s.massima_corrente})
     return res
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
