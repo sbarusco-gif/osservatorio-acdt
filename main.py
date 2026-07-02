@@ -11,11 +11,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 import models, schemas, database
 
-# Inizializzazione Database
-models.Base.metadata.create_all(bind=database.engine)
+app = FastAPI(title="Osservatorio ACDT - v5")
 
-app = FastAPI(title="Osservatorio ACDT - v4")
-
+# --- CONFIGURAZIONE CORS ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -24,13 +22,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Creazione tabelle all'avvio senza bloccare il server
+@app.on_event("startup")
+def startup_event():
+    models.Base.metadata.create_all(bind=database.engine)
+
 UPLOAD_DIR = "storage"
 if not os.path.exists(UPLOAD_DIR):
     os.makedirs(UPLOAD_DIR)
 
 app.mount("/storage", StaticFiles(directory="storage"), name="storage")
 
-# --- MOTORE IA MASSIMARIO PROFESSIONALE ---
+# --- FUNZIONE IA MASSIMARIO ---
 def analizza_sentenza_ai(id_fascicolo: str, file_path: str):
     db = database.SessionLocal()
     api_key = os.getenv("OPENAI_API_KEY")
@@ -39,17 +42,15 @@ def analizza_sentenza_ai(id_fascicolo: str, file_path: str):
         testo = "".join([p.get_text() for p in doc.pages(0, 6)])
         doc.close()
 
-        if len(testo.strip()) < 100 or not api_key:
-            raise ValueError("Testo insufficiente o Chiave API mancante.")
+        if not api_key: return
 
         client = openai.OpenAI(api_key=api_key)
-        prompt_sistema = """Agisci come l'Ufficio del Massimario. Estrai in JSON: 
-        'organo' (Corte), 'numero' (Sentenza/Anno), 'data' (GG-MM-AAAA), 
-        'massima' (Tecnica, astratta, linguaggio formale), 'norme' (Articoli citati)."""
+        prompt = """Agisci come l'Ufficio del Massimario. Estrai in JSON: 
+        'organo', 'numero', 'data' (GG-MM-AAAA), 'massima' (Tecnica e astratta), 'norme'."""
         
         response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role": "system", "content": prompt_sistema}, {"role": "user", "content": testo[:15000]}],
+            messages=[{"role": "system", "content": prompt}, {"role": "user", "content": testo[:12000]}],
             response_format={ "type": "json_object" }
         )
         dati = json.loads(response.choices[0].message.content)
@@ -66,8 +67,7 @@ def analizza_sentenza_ai(id_fascicolo: str, file_path: str):
         if f: f.stato = models.StatoFascicolo.Da_validare
         db.commit()
     except Exception as e:
-        db.add(models.Scheda(id_fascicolo=id_fascicolo, organo_ai="ERRORE", massima_ai=f"Analisi fallita: {e}"))
-        db.commit()
+        print(f"Errore IA: {e}")
     finally:
         db.close()
 
@@ -94,17 +94,8 @@ def get_s(id: uuid.UUID, db: Session = Depends(database.get_db)):
 
 @app.get("/v1/archivio")
 def get_arch(db: Session = Depends(database.get_db)):
-    # UNIAMO SCHEDE E FASCICOLI PER AVERE IL FILE_URL
     query = db.query(models.Scheda, models.Fascicolo).join(models.Fascicolo).filter(models.Fascicolo.stato == models.StatoFascicolo.Validato).all()
-    res = []
-    for s, f in query:
-        res.append({
-            "organo": s.organo_corrente, 
-            "numero": s.numero_sentenza_corrente, 
-            "massima": s.massima_corrente,
-            "file_url": f"/storage/{os.path.basename(f.file_originale)}" # QUI AGGIUNGIAMO LA CHIAVE MANCANTE
-        })
-    return res
+    return [{"organo": s.organo_corrente, "numero": s.numero_sentenza_corrente, "massima": s.massima_corrente, "file_url": f"/storage/{os.path.basename(f.file_originale)}"} for s, f in query]
 
 @app.patch("/v1/fascicoli/{id}/validate")
 def validate(id: uuid.UUID, payload: schemas.ValidazioneInput, db: Session = Depends(database.get_db)):
@@ -118,4 +109,6 @@ def validate(id: uuid.UUID, payload: schemas.ValidazioneInput, db: Session = Dep
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    # Forza la porta 10000 che Render si aspetta
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
