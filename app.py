@@ -48,9 +48,8 @@ Base.metadata.create_all(bind=engine)
 SessionLocal = sessionmaker(bind=engine)
 db = SessionLocal()
 
-# --- NUOVA MODALITÀ DI REDAZIONE MASSIMA ---
+# --- UTILS AI AVANZATE ---
 def formatta_massima_sistematica(d):
-    """Formatta i dati con lo schema: Keywords, Principio, Norme, Esito"""
     m = d.get("massima_dati", {})
     testo = f"**PAROLE CHIAVE**: {m.get('keywords', 'N/D')}\n\n"
     testo += f"**PRINCIPIO DI DIRITTO**: {m.get('principio', 'N/D')}\n\n"
@@ -64,53 +63,39 @@ def analizza_sentenza(file_path):
     client = Groq(api_key=api_key)
     try:
         doc = fitz.open(file_path)
-        # Estrazione strategica: prime 4 pagine e ultima (PQM)
         testo = "\n".join([doc[i].get_text() for i in range(min(4, len(doc)))]) + "\n" + doc[-1].get_text()
         doc.close()
-
-        prompt = f"""Sei un esperto di tecnica di redazione del Massimario Giuridico. 
-        Analizza la sentenza ed estrai i dati in formato JSON rigoroso.
-        
-        SCHEMA DI REDAZIONE:
-        - keywords: 3-5 concetti chiave separati da virgola.
-        - principio: Enuncia il principio di diritto (regola astratta) in modo asciutto.
-        - norme: Articoli di legge rilevanti citati.
-        - esito: Sintesi del verdetto (es. Accoglimento ricorso contribuente).
-
-        JSON richiesto: {{"organo": "...", "numero": "...", "massima_dati": {{"keywords": "...", "principio": "...", "norme": "...", "esito": "..."}}}}
-
-        TESTO: {testo[:8000]}"""
-
+        prompt = f"""Sei un esperto di redazione del Massimario Giuridico. Analizza la sentenza ed estrai i dati in JSON.
+        SCHEMA:
+        - keywords: 3-5 concetti chiave.
+        - principio: Regola astratta di diritto (In tema di...).
+        - norme: Articoli di legge rilevanti.
+        - esito: Sintesi verdetto.
+        Testo: {testo[:8000]}"""
         chat = client.chat.completions.create(
-            messages=[{"role": "system", "content": "Rispondi esclusivamente in JSON puro."}, {"role": "user", "content": prompt}],
+            messages=[{"role": "system", "content": "Rispondi in JSON puro."}, {"role": "user", "content": prompt}],
             model="llama-3.1-8b-instant", temperature=0.0
         )
         res_raw = re.sub(r'```json\s*|```', '', chat.choices[0].message.content).strip()
         dati = json.loads(re.search(r'\{.*\}', res_raw, re.DOTALL).group())
-        
-        return {
-            "organo": dati.get("organo"),
-            "numero": dati.get("numero"),
-            "massima": formatta_massima_sistematica(dati)
-        }, None
+        return {"organo": dati.get("organo"), "numero": dati.get("numero"), "massima": formatta_massima_sistematica(dati)}, None
     except Exception as e: return None, str(e)
 
-# --- ESPORTAZIONE WORD ---
+# --- ESPORTAZIONI ---
 def genera_word(lista_sentenze):
     doc = Document()
-    doc.add_heading('Massimario Giurisprudenza Tributaria ACDT', 0).alignment = 1
+    doc.add_heading('Osservatorio ACDT - Massimario Giuridico', 0).alignment = 1
     for i in lista_sentenze:
         p = doc.add_paragraph()
         run = p.add_run(f"{i.organo}")
         run.bold, run.font.size, run.font.color.rgb = True, Pt(12), RGBColor(138, 28, 61)
-        doc.add_paragraph(f"Sentenza n. {i.numero} | Redattore: {i.autore}").italic = True
-        p_m = doc.add_paragraph(i.massima.replace("**", ""))
-        p_m.alignment = 3 
-        doc.add_paragraph("-" * 40).alignment = 1
+        doc.add_paragraph(f"Sentenza n. {i.numero} | Autore: {i.autore}").italic = True
+        doc.add_paragraph(i.massima.replace("**", "")).alignment = 3
+        doc.add_paragraph("-" * 30).alignment = 1
     target = BytesIO(); doc.save(target)
     return target.getvalue()
 
-# --- INTERFACCIA STREAMLIT ---
+# --- SIDEBAR ---
 with st.sidebar:
     if LOGO_PATH: st.image(LOGO_PATH, use_container_width=True)
     st.markdown("---")
@@ -121,25 +106,42 @@ tab_home, tab_gest, tab_arch = st.tabs(["🏠 Home Page", "📋 Gestione Analisi
 
 # --- TAB HOME ---
 with tab_home:
-    col_l, col_r = st.columns([0.3, 0.7])
-    if LOGO_PATH: col_l.image(LOGO_PATH, use_container_width=True)
-    with col_r:
+    col_logo, col_titolo = st.columns([0.25, 0.75])
+    with col_logo:
+        if LOGO_PATH: st.image(LOGO_PATH, use_container_width=True)
+    with col_titolo:
         st.markdown("# Osservatorio Giurisprudenza Tributaria")
         st.markdown("### Associazione Commercialisti Difensori Tributari del Veneto")
+
     st.markdown("---")
-    v = db.query(Sentenza).filter(Sentenza.stato == "Validato").count()
-    t = db.query(Sentenza).count()
-    cs1, cs2 = st.columns(2)
-    cs1.metric("Sentenze Totali", t)
-    cs2.metric("In Archivio", v)
+    total = db.query(Sentenza).count()
+    validati = db.query(Sentenza).filter(Sentenza.stato == "Validato").count()
+    c_s1, c_s2, c_s3 = st.columns(3)
+    c_s1.metric("Sentenze Processate", total)
+    c_s2.metric("In Archivio Storico", validated := validati)
+    c_s3.metric("Modello AI", "Llama 3.1 8B")
+
     st.markdown("---")
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown("#### 🔍 Modalità Scientifica")
-        st.write("Il sistema adotta uno schema di redazione basato su: Parole Chiave, Principio di Diritto, Riferimenti Normativi ed Esito della decisione.")
+        st.markdown("#### 🔍 Come Funziona?")
+        st.write("""
+        1. **Caricamento**: Nella scheda 'Gestione' puoi caricare uno o più PDF contemporaneamente.
+        2. **Analisi IA**: L'intelligenza artificiale scansiona il testo, identifica l'organo giudicante, il numero della sentenza ed elabora una proposta di massima.
+        3. **Validazione**: Hai la possibilità di modificare i campi estratti. Una volta confermati, i dati diventano definitivi.
+        4. **Consultazione**: Tutte le sentenze validate finiscono nell'Archivio, pronti per essere ricercati o esportati.
+        """)
     with c2:
-        st.markdown("#### 📄 Documentazione")
-        st.write("Ogni analisi è revisionabile manualmente e scaricabile in formato Excel o report Word professionale.")
+        st.markdown("#### ⚖️ Metodologia Scientifica")
+        st.write("""
+        Il software adotta una modalità di redazione sistematica della massima, garantendo che ogni documento sia indicizzato per:
+        - **Keywords**: Identificazione immediata dei temi trattati.
+        - **Principio di Diritto**: La sintesi della 'ratio decidendi'.
+        - **Norme**: I riferimenti legislativi applicati.
+        - **Esito**: Il risultato del giudizio.
+        """)
+    
+    st.info("Piattaforma tecnologica sviluppata per l'Associazione Commercialisti Difensori Tributari del Veneto.")
 
 # --- TAB GESTIONE ---
 with tab_gest:
@@ -147,8 +149,8 @@ with tab_gest:
     with col_up:
         st.subheader("📤 Caricamento")
         firma = st.text_input("Firma Redattore", value="Redazione")
-        u_files = st.file_uploader("Seleziona PDF", type="pdf", accept_multiple_files=True)
-        if st.button("🚀 AVVIA ANALISI SISTEMATICA", use_container_width=True):
+        u_files = st.file_uploader("Seleziona i PDF", type="pdf", accept_multiple_files=True)
+        if st.button("🚀 AVVIA ELABORAZIONE", use_container_width=True):
             if u_files:
                 for f in u_files:
                     f_id = str(uuid.uuid4()); path = f"storage/{f_id}.pdf"
@@ -162,23 +164,23 @@ with tab_gest:
                 st.rerun()
 
     with col_rev:
-        st.subheader("✍️ Revisione Massime")
+        st.subheader("✍️ Revisione")
         nuovi = db.query(Sentenza).filter(Sentenza.stato == "Nuovo").all()
         if nuovi:
-            if st.button("🚀 PUBBLICA TUTTO IN ARCHIVIO", use_container_width=True):
+            if st.button("🚀 PUBBLICA TUTTI I DOCUMENTI", use_container_width=True):
                 for s in nuovi: s.stato = "Validato"
                 db.commit(); st.rerun()
             for s in nuovi:
                 with st.expander(f"📝 {s.organo} - {s.numero}", expanded=True):
                     o, n = st.text_input("Corte", s.organo, key=f"o{s.id}"), st.text_input("N.", s.numero, key=f"n{s.id}")
-                    m = st.text_area("Massima Sistematica", s.massima, height=350, key=f"m{s.id}")
+                    m = st.text_area("Massima", s.massima, height=300, key=f"m{s.id}")
                     c1, c2 = st.columns(2)
                     if c1.button("✅ VALIDA", key=f"p{s.id}", use_container_width=True):
                         s.organo, s.numero, s.massima, s.stato = o, n, m, "Validato"
                         db.commit(); st.rerun()
                     if c2.button("🗑️ ELIMINA", key=f"d{s.id}", use_container_width=True):
                         db.delete(s); db.commit(); st.rerun()
-        else: st.info("Nessuna analisi da revisionare.")
+        else: st.info("Nessuna analisi in attesa.")
 
 # --- TAB ARCHIVIO ---
 with tab_arch:
