@@ -3,7 +3,7 @@ import os, uuid, fitz, json, time
 from sqlalchemy import create_engine, Column, String
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-from groq import Groq  # Nuova libreria Groq
+from groq import Groq
 
 # --- DATABASE CONFIG ---
 DB_URL = "sqlite:///./osservatorio.db"
@@ -22,7 +22,7 @@ engine = create_engine(DB_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base.metadata.create_all(bind=engine)
 
-# --- FUNZIONE ANALISI CON GROQ (GRATIS) ---
+# --- FUNZIONE ANALISI CON GROQ (MODELLO AGGIORNATO) ---
 def analizza_sentenza(file_path):
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
@@ -32,7 +32,7 @@ def analizza_sentenza(file_path):
     
     try:
         doc = fitz.open(file_path)
-        # Leggiamo le parti salienti
+        # Leggiamo inizio e fine del PDF
         testo = doc[0].get_text() + "\n...\n" + doc[-1].get_text()
         doc.close()
         
@@ -41,17 +41,17 @@ def analizza_sentenza(file_path):
         1. Estrai l'organo giudicante.
         2. Estrai il numero della sentenza e l'anno.
         3. Scrivi una massima tecnica e astratta (principio di diritto).
-        4. Rispondi ESCLUSIVAMENTE con il JSON.
+        4. Rispondi ESCLUSIVAMENTE con il JSON puro.
         
         TESTO: {testo[:8000]}"""
 
-        # Usiamo Llama 3.1 70B (molto potente per il diritto)
+        # MODELLO AGGIORNATO: llama-3.3-70b-versatile (Il più recente e potente)
         chat_completion = client.chat.completions.create(
             messages=[
                 {"role": "system", "content": "Sei un esperto giurista che risponde solo in JSON."},
                 {"role": "user", "content": prompt}
             ],
-            model="llama-3.1-70b-versatile",
+            model="llama-3.3-70b-versatile",
             temperature=0,
             response_format={"type": "json_object"}
         )
@@ -63,7 +63,8 @@ def analizza_sentenza(file_path):
 
 # --- INTERFACCIA STREAMLIT ---
 st.set_page_config(page_title="Osservatorio Groq", layout="wide", page_icon="⚖️")
-st.title("⚖️ Osservatorio Giurisprudenza Tributaria (Llama 3.1)")
+st.title("⚖️ Osservatorio Giurisprudenza Tributaria")
+st.caption("Motore AI: Llama 3.3 70B (Gratuito)")
 
 db = SessionLocal()
 t_gest, t_arch = st.tabs(["📋 Revisione", "📚 Archivio"])
@@ -80,7 +81,7 @@ with t_gest:
                 with open(path, "wb") as f:
                     f.write(u_file.getbuffer())
                 
-                with st.spinner("Analisi ultra-rapida in corso..."):
+                with st.spinner("Analisi ultra-rapida con Llama 3.3..."):
                     risultato, errore = analizza_sentenza(path)
                     if errore:
                         st.error(errore)
