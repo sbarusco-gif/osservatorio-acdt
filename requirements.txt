@@ -1,6 +1,4 @@
 streamlit
-anthropic
+groq
 pymupdf
 sqlalchemy
-requests
-pandas
