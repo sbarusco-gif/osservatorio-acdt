@@ -1,5 +1,5 @@
 streamlit
-openai
+anthropic
 pymupdf
 sqlalchemy
 requests
