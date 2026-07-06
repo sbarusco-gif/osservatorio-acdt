@@ -4,3 +4,4 @@ pymupdf
 sqlalchemy
 pandas
 openpyxl
+python-docx
