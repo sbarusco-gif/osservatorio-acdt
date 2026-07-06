@@ -1,76 +1,131 @@
 import streamlit as st
 import requests
-import pandas as pd
 import os
+import time
 
-API_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:10000").strip("/")
-HEADERS = {"User-Agent": "Mozilla/5.0"}
+# --- CONFIGURAZIONE ---
+st.set_page_config(page_title="ACDT AI - Osservatorio", layout="wide", page_icon="⚖️")
 
-st.set_page_config(page_title="ACDT AI", layout="wide", page_icon="⚖️")
-st.title("⚖️ Osservatorio Giurisprudenza Tributaria")
+# Recupero dinamico dell'URL del backend
+# Se sei su Render, imposta BACKEND_URL nelle Environment Variables con l'indirizzo della tua app
+DEFAULT_API = "https://osservatorio-dashboard.onrender.com"
+API_URL = os.getenv("BACKEND_URL", DEFAULT_API).strip("/")
+HEADERS = {"User-Agent": "ACDT-Dashboard/1.0"}
 
-def safe_req(method, endpoint, **kwargs):
+# --- FUNZIONE LOGICA API (POTENZIATA) ---
+def call_api(method, endpoint, params=None, json=None, files=None, timeout=20):
+    url = f"{API_URL}{endpoint}"
     try:
-        url = f"{API_URL}{endpoint}"
-        if method == "GET": r = requests.get(url, headers=HEADERS, timeout=15, **kwargs)
-        elif method == "POST": r = requests.post(url, headers=HEADERS, timeout=30, **kwargs)
-        elif method == "PATCH": r = requests.patch(url, headers=HEADERS, timeout=15, **kwargs)
-        return r.json() if r.status_code == 200 else None
-    except: return None
+        if method == "GET":
+            r = requests.get(url, headers=HEADERS, params=params, timeout=timeout)
+        elif method == "POST":
+            r = requests.post(url, headers=HEADERS, json=json, files=files, timeout=timeout)
+        elif method == "PATCH":
+            r = requests.patch(url, headers=HEADERS, json=json, timeout=timeout)
+        
+        if r.status_code == 200:
+            return r.json()
+        else:
+            st.error(f"❌ Errore Server ({r.status_code}): {r.text}")
+            return None
+    except requests.exceptions.ConnectionError:
+        st.warning(f"⚠️ Impossibile connettersi al server all'indirizzo: {API_URL}")
+        return "CONNECTION_ERROR"
+    except Exception as e:
+        st.error(f"💥 Errore imprevisto: {e}")
+        return None
 
-t_gest, t_ricerca, t_arch = st.tabs(["📋 Gestione", "🔍 Ricerca AI", "📚 Archivio"])
+# --- UI PRINCIPALE ---
+st.title("⚖️ Osservatorio Giurisprudenza Tributaria")
+st.caption(f"Connesso a: {API_URL}")
 
+t_gest, t_ricerca, t_arch = st.tabs(["📋 Gestione Fascicoli", "🔍 Ricerca AI", "📚 Archivio Storico"])
+
+# --- TAB 1: GESTIONE ---
 with t_gest:
-    u_file = st.sidebar.file_uploader("Carica PDF", type="pdf")
-    if st.sidebar.button("Invia all'IA"):
+    st.sidebar.header("Caricamento Documenti")
+    u_file = st.sidebar.file_uploader("Trascina qui il PDF della sentenza", type="pdf")
+    
+    if st.sidebar.button("🚀 Elabora con AI"):
         if u_file:
-            files = {"file": (u_file.name, u_file.getvalue(), "application/pdf")}
-            requests.post(f"{API_URL}/v1/fascicoli/upload", files=files, headers=HEADERS)
-            st.rerun()
+            with st.spinner("L'intelligenza artificiale sta analizzando il documento..."):
+                files = {"file": (u_file.name, u_file.getvalue(), "application/pdf")}
+                res = call_api("POST", "/v1/fascicoli/upload", files=files)
+                if res:
+                    st.sidebar.success("Documento inviato con successo!")
+                    time.sleep(2)
+                    st.rerun()
+        else:
+            st.sidebar.warning("Seleziona un file prima di inviare.")
 
-    dati = safe_req("GET", "/v1/fascicoli")
-    if dati:
-        da_v = [f for f in dati if f['stato'] != 'Validato']
-        if da_v:
-            id_sel = st.selectbox("Seleziona ID", [f["id"] for f in da_v])
-            scheda = safe_req("GET", f"/v1/fascicoli/{id_sel}/scheda")
+    st.subheader("Fascicoli in attesa di revisione")
+    dati = call_api("GET", "/v1/fascicoli")
+
+    if dati == "CONNECTION_ERROR":
+        st.info("🔄 Tentativo di riconnessione in corso... Verifica che il backend sia attivo.")
+    elif dati:
+        da_validare = [f for f in dati if f.get('stato') != 'Validato']
+        
+        if da_validare:
+            id_sel = st.selectbox("Seleziona fascicolo da revisionare", 
+                                  options=[f["id"] for f in da_validare],
+                                  format_func=lambda x: f"Fascicolo ID: {x}")
+            
+            scheda = call_api("GET", f"/v1/fascicoli/{id_sel}/scheda")
+            
             if scheda:
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.info("### 🤖 Bozza AI")
-                    st.write(f"**Corte:** {scheda.get('organo_ai')}")
-                    st.write(f"**Numero:** {scheda.get('numero_sentenza_ai')}")
-                    st.markdown(f"> {scheda.get('massima_ai')}")
-                with c2:
-                    st.success("### ✅ Revisione")
-                    v_org = st.text_input("Organo", value=scheda.get('organo_ai') or "")
-                    v_num = st.text_input("Numero", value=scheda.get('numero_sentenza_ai') or "")
-                    v_dat = st.text_input("Data (GG-MM-AAAA)")
-                    v_max = st.text_area("Massima", value=scheda.get('massima_ai') or "", height=250)
-                    if st.button("APPROVA"):
-                        p = {"organo": v_org, "numero": v_num, "massima": v_max, "note_riservate": v_dat}
-                        safe_req("PATCH", f"/v1/fascicoli/{id_sel}/validate", json=p)
-                        st.rerun()
-        else: st.info("Tutto validato.")
-    else: st.warning("In attesa del server...")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown("### 🤖 Suggerimento AI")
+                    st.info(f"**Organo:** {scheda.get('organo_ai', 'N/D')}\n\n"
+                            f"**Sentenza n.:** {scheda.get('numero_sentenza_ai', 'N/D')}\n\n"
+                            f"**Massima proposta:**\n\n{scheda.get('massima_ai', 'Generazione in corso...')}")
+                
+                with col2:
+                    st.markdown("### ✅ Validazione Umana")
+                    v_org = st.text_input("Organo Giudicante", value=scheda.get('organo_ai') or "")
+                    v_num = st.text_input("Numero Sentenza", value=scheda.get('numero_sentenza_ai') or "")
+                    v_dat = st.text_input("Data Deposito (es. 01/01/2024)", value=scheda.get('note_riservate') or "")
+                    v_max = st.text_area("Massima Definitiva", value=scheda.get('massima_ai') or "", height=300)
+                    
+                    if st.button("CONFERMA E PUBBLICA", use_container_width=True):
+                        payload = {"organo": v_org, "numero": v_num, "massima": v_max, "note_riservate": v_dat}
+                        if call_api("PATCH", f"/v1/fascicoli/{id_sel}/validate", json=payload):
+                            st.success("Sentenza pubblicata in archivio!")
+                            time.sleep(1)
+                            st.rerun()
+        else:
+            st.success("✅ Ottimo lavoro! Tutti i fascicoli sono stati revisionati.")
+    else:
+        st.write("Nessun fascicolo da mostrare.")
 
+# --- TAB 2: RICERCA AI ---
 with t_ricerca:
-    q = st.text_input("Cosa cerchi?")
-    if q:
-        r = safe_req("GET", "/v1/ricerca/ai", params={"domanda": q})
-        if r:
-            for res in r:
-                with st.expander(f"{res['organo_corrente']} - {res['numero_sentenza_corrente']}"):
-                    st.write(res['massima_corrente'])
+    st.subheader("Chiedi all'intelligenza artificiale")
+    domanda = st.text_input("Inserisci un quesito giuridico (es: Orientamento Cassazione su IMU prima casa)")
+    
+    if domanda:
+        with st.spinner("Ricerca nei precedenti in corso..."):
+            risultati = call_api("GET", "/v1/ricerca/ai", params={"domanda": domanda})
+            if risultati:
+                for r in risultati:
+                    with st.expander(f"⚖️ {r.get('organo_corrente')} - n. {r.get('numero_sentenza_corrente')}"):
+                        st.markdown(f"**Massima:**\n{r.get('massima_corrente')}")
+                        if r.get('punteggio'):
+                            st.caption(f"Rilevanza: {round(r['punteggio']*100)}%")
 
+# --- TAB 3: ARCHIVIO ---
 with t_arch:
-    arch = safe_req("GET", "/v1/archivio")
-    if arch:
-        for i in arch:
-            col_t, col_l = st.columns([0.8, 0.2])
-            with col_t:
-                st.subheader(f"{i.get('organo')} - {i.get('numero')}")
-                st.write(i.get('massima'))
-            with col_l:
-                if i.get('file_url'): st.link_button("📄 PDF", f"{API_URL}{i['file_url']}")
-            st.divider()
+    st.subheader("Sentenze Validate")
+    archivio = call_api("GET", "/v1/archivio")
+    if archivio:
+        for item in archivio:
+            with st.container():
+                c1, c2 = st.columns([0.85, 0.15])
+                with c1:
+                    st.markdown(f"### {item.get('organo')} - {item.get('numero')}")
+                    st.write(item.get('massima'))
+                with c2:
+                    if item.get('file_url'):
+                        st.link_button("📂 PDF", f"{API_URL}{item['file_url']}")
+                st.divider()
