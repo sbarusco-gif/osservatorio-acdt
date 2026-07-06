@@ -2,3 +2,5 @@ streamlit
 groq
 pymupdf
 sqlalchemy
+pandas
+openpyxl
