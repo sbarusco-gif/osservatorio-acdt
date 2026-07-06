@@ -7,6 +7,9 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from groq import Groq
 
+# --- CONFIGURAZIONE AUTORE SOFTWARE ---
+AUTORE_SOFTWARE = "Sviluppato da [Il Tuo Nome/Studio Legale]" # <--- CAMBIA QUI IL TUO NOME
+
 # --- DATABASE CONFIG ---
 DB_URL = "sqlite:///./osservatorio.db"
 Base = declarative_base()
@@ -79,8 +82,8 @@ def analizza_sentenza(file_path):
         return dati, None
     except Exception as e: return None, str(e)
 
-# --- INTERFACCIA ---
-st.set_page_config(page_title="Osservatorio ACDT", layout="wide", page_icon="⚖️")
+# --- INTERFACCIA STREAMLIT ---
+st.set_page_config(page_title="Osservatorio ACDT AI", layout="wide", page_icon="⚖️")
 st.title("⚖️ Osservatorio Giurisprudenza Tributaria")
 
 db = SessionLocal()
@@ -89,7 +92,7 @@ t_gest, t_arch = st.tabs(["📋 Gestione e Revisione", "📚 Archivio Storico"])
 with t_gest:
     with st.sidebar:
         st.header("Caricamento")
-        autore_default = st.text_input("Firma Autore", value="Redazione")
+        autore_default = st.text_input("Firma Caricamento", value="Redazione")
         u_files = st.file_uploader("Seleziona PDF", type="pdf", accept_multiple_files=True)
         if st.button("🚀 ELABORA SENTENZE"):
             if u_files:
@@ -106,6 +109,10 @@ with t_gest:
                         db.add(s); db.commit()
                     progress.progress((idx + 1) / len(u_files))
                 st.rerun()
+        
+        # --- CREDITS SIDEBAR ---
+        st.sidebar.markdown("---")
+        st.sidebar.caption(f"🚀 **Software Author:**\n{AUTORE_SOFTWARE}")
 
     st.subheader("Massime da Revisionare")
     nuovi = db.query(Sentenza).filter(Sentenza.stato == "Nuovo").all()
@@ -117,7 +124,7 @@ with t_gest:
                 n = st.text_input("Numero", s.numero, key=f"n{s.id}")
                 m = st.text_area("Massima", s.massima, height=350, key=f"m{s.id}")
             with c2:
-                aut = st.text_input("Autore", s.autore, key=f"a{s.id}")
+                aut = st.text_input("Firma Autore", s.autore, key=f"a{s.id}")
                 if st.button("✅ PUBBLICA", key=f"p{s.id}", use_container_width=True):
                     s.organo, s.numero, s.massima, s.autore, s.stato = o, n, m, aut, "Validato"
                     db.commit(); st.rerun()
@@ -129,7 +136,7 @@ with t_arch:
     arch = db.query(Sentenza).filter(Sentenza.stato == "Validato").all()
     if arch:
         c1, c2, c3 = st.columns([0.4, 0.3, 0.3])
-        df = pd.DataFrame([{"Organo": i.organo, "Sentenza": i.numero, "Massima": i.massima.replace("**", ""), "Autore": i.autore} for i in arch])
+        df = pd.DataFrame([{"Organo": i.organo, "Sentenza": i.numero, "Massima": i.massima.replace("**", ""), "Firma": i.autore} for i in arch])
         output = BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Archivio')
@@ -142,7 +149,7 @@ with t_arch:
                 col_a, col_b = st.columns([0.8, 0.2])
                 with col_a:
                     st.markdown(f"### {i.organo}")
-                    st.markdown(f"**Sentenza n. {i.numero}** | *Autore: {i.autore}*")
+                    st.markdown(f"**Sentenza n. {i.numero}** | *Firma: {i.autore}*")
                     st.write(i.massima)
                 with col_b:
                     if os.path.exists(i.file_path):
@@ -150,5 +157,9 @@ with t_arch:
                             st.download_button("📂 PDF", f_pdf, file_name=f"{i.numero}.pdf", key=f"dl_{i.id}")
     else:
         st.info("Archivio vuoto.")
+
+# --- FOOTER ---
+st.markdown("---")
+st.caption(f"© 2025 Osservatorio Giurisprudenza Tributaria AI - {AUTORE_SOFTWARE}")
 
 db.close()
