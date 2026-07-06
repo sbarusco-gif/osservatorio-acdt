@@ -8,7 +8,7 @@ from sqlalchemy.orm import sessionmaker
 from groq import Groq
 
 # --- CONFIGURAZIONE AUTORE SOFTWARE ---
-AUTORE_SOFTWARE = "Sviluppato da [Il Tuo Nome/Studio Legale]" # <--- CAMBIA QUI IL TUO NOME
+AUTORE_SOFTWARE = "Sviluppato da [Sebastiano Barusco]" # <--- CAMBIA QUI IL TUO NOME
 
 # --- DATABASE CONFIG ---
 DB_URL = "sqlite:///./osservatorio.db"
