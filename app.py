@@ -1,5 +1,17 @@
 import streamlit as st
 import os, uuid, fitz, json, time
+# Aggiungi questo subito dopo gli import
+import os
+from flask import Flask
+from threading import Thread
+# Crea un piccolo server parallelo solo per l'health check di Render
+if os.environ.get("RENDER"):
+    health_app = Flask(__name__)
+    @health_app.route('/')
+    def health(): return "OK", 200
+    def run_health(): health_app.run(host="0.0.0.0", port=10001) # Porta diversa
+    Thread(target=run_health, daemon=True).start()
+
 from sqlalchemy import create_engine, Column, String
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
