@@ -54,7 +54,7 @@ db = SessionLocal()
 
 # --- UTILS AI ROBUSTE ---
 def formatta_massima_sistematica(m_dati):
-    """Estrae i valori dal dizionario includendo il nuovo campo OGGETTO CAUSA"""
+    """Estrae i valori dal dizionario con OGGETTO AMPLIATO e senza Keywords"""
     def get_val(keys):
         for k in keys:
             if k in m_dati: return m_dati[k]
@@ -62,11 +62,10 @@ def formatta_massima_sistematica(m_dati):
             if k.replace(" ", "_") in m_dati: return m_dati[k.replace(" ", "_")]
         return "Dato non rilevato"
 
-    testo = f"**PAROLE CHIAVE**: {get_val(['keywords', 'parole chiave'])}\n\n"
-    testo += f"**OGGETTO DELLA CAUSA**: {get_val(['oggetto_breve', 'oggetto', 'sintesi_causa'])}\n\n"
-    testo += f"**PRINCIPIO DI DIRITTO**: {get_val(['principio', 'principio di diritto'])}\n\n"
-    testo += f"**RIFERIMENTI NORMATIVI**: {get_val(['norme', 'riferimenti normativi'])}\n\n"
-    testo += f"**ESITO DELLA DECISIONE**: {get_val(['esito', 'decisione'])}"
+    testo = f"**OGGETTO DELLA CAUSA (FATTISPECIE)**:\n{get_val(['oggetto_ampliato', 'oggetto', 'descrizione_causa'])}\n\n"
+    testo += f"**PRINCIPIO DI DIRITTO**: \n{get_val(['principio', 'principio di diritto'])}\n\n"
+    testo += f"**RIFERIMENTI NORMATIVI**: \n{get_val(['norme', 'riferimenti normativi'])}\n\n"
+    testo += f"**ESITO DELLA DECISIONE**: \n{get_val(['esito', 'decisione'])}"
     return testo
 
 def pulisci_e_carica_json(testo_raw):
@@ -82,26 +81,27 @@ def analizza_sentenza(file_path):
     client = Groq(api_key=api_key)
     try:
         doc = fitz.open(file_path)
-        testo_estratto = "\n".join([doc[i].get_text() for i in range(min(4, len(doc)))]) + "\n" + doc[-1].get_text()
+        # Leggiamo un contesto più ampio per l'oggetto dettagliato (prime 5 pagine + ultima)
+        testo_estratto = "\n".join([doc[i].get_text() for i in range(min(5, len(doc)))]) + "\n" + doc[-1].get_text()
         doc.close()
         
-        prompt = f"""Sei l'Ufficio del Massimario. Analizza la sentenza ed estrai i dati in JSON puro.
+        prompt = f"""Sei un Magistrato addetto all'Ufficio del Massimario. Analizza la sentenza ed estrai i dati in JSON puro.
         CAMPI RICHIESTI:
         1. "organo": Nome corte.
         2. "numero": Numero sentenza/anno.
         3. "massima_dati": {{ 
-            "keywords": "3-5 parole chiave", 
-            "oggetto_breve": "Sintesi estrema della lite (max 12 parole)", 
-            "principio": "Regola astratta", 
-            "norme": "Articoli citati", 
-            "esito": "Verdetto in 3 parole" 
+            "oggetto_ampliato": "Descrizione analitica e dettagliata della lite, dei motivi del ricorso e dei fatti di causa.", 
+            "principio": "Enunciazione del principio di diritto applicato (ratio decidendi).", 
+            "norme": "Articoli di legge rilevanti citati.", 
+            "esito": "Sintesi dell'esito della decisione." 
         }}
-        TESTO: {testo_estratto[:8000]}"""
+        REGOLE: Sii molto dettagliato nell'oggetto della causa. Rispondi esclusivamente in JSON puro.
+        TESTO: {testo_estratto[:9000]}"""
 
         chat = client.chat.completions.create(
-            messages=[{"role": "system", "content": "Rispondi esclusivamente in JSON puro."},
+            messages=[{"role": "system", "content": "Sei un redattore esperto di massimari giuridici. Rispondi in JSON."},
                       {"role": "user", "content": prompt}],
-            model="llama-3.1-8b-instant", temperature=0.0
+            model="llama-3.1-8b-instant", temperature=0.1
         )
         dati = pulisci_e_carica_json(chat.choices[0].message.content)
         if not dati: return None, "Errore formato JSON."
@@ -116,13 +116,13 @@ def analizza_sentenza(file_path):
 def ricerca_ai(domanda, sentenze_validate):
     api_key = os.getenv("GROQ_API_KEY")
     client = Groq(api_key=api_key)
-    context = "\n".join([f"ID:{s.id} | INFO:{s.organo} n.{s.numero} | TESTO:{s.massima[:600]}" for s in sentenze_validate])
-    prompt = f"""L'utente cerca: "{domanda}". Identifica tra queste sentenze le più rilevanti. 
+    context = "\n".join([f"ID:{s.id} | INFO:{s.organo} n.{s.numero} | TESTO:{s.massima[:700]}" for s in sentenze_validate])
+    prompt = f"""L'utente cerca: "{domanda}". Identifica tra queste sentenze le più rilevanti per risolvere il quesito. 
     Restituisci JSON: {{"risultati": [{{"id": "...", "perche": "..."}}]}}
-    LISTA: {context}"""
+    LISTA PRECEDENTI: {context}"""
     try:
         chat = client.chat.completions.create(
-            messages=[{"role": "system", "content": "Sei un assistente legale. Rispondi in JSON."},
+            messages=[{"role": "system", "content": "Sei un assistente legale specializzato in tributario. Rispondi in JSON."},
                       {"role": "user", "content": prompt}],
             model="llama-3.1-8b-instant", temperature=0.1
         )
@@ -132,7 +132,7 @@ def ricerca_ai(domanda, sentenze_validate):
 # --- ESPORTAZIONI ---
 def genera_word(lista_sentenze):
     doc = Document()
-    doc.add_heading('Massimario ACDT', 0).alignment = 1
+    doc.add_heading('Massimario ACDT - Report Giurisprudenziale', 0).alignment = 1
     for i in lista_sentenze:
         p = doc.add_paragraph()
         run = p.add_run(f"{i.organo}")
@@ -150,7 +150,7 @@ with st.sidebar:
     st.markdown(f"👨‍💻 **Author:** {AUTORE_SOFTWARE}")
     st.caption(COPYRIGHT_NOTE)
 
-tab_home, tab_gest, tab_search, tab_arch = st.tabs(["🏠 Home", "📋 Gestione", "🔍 Ricerca AI", "📚 Archivio"])
+tab_home, tab_gest, tab_search, tab_arch = st.tabs(["🏠 Home Page", "📋 Gestione Analisi", "🔍 Ricerca Intelligente AI", "📚 Archivio Storico"])
 
 # --- TAB HOME ---
 with tab_home:
@@ -163,62 +163,74 @@ with tab_home:
     total = db.query(Sentenza).count()
     validati = db.query(Sentenza).filter(Sentenza.stato == "Validato").count()
     c_s1, c_s2, c_s3 = st.columns(3)
-    c_s1.metric("Analisi Totali", total)
+    c_s1.metric("Sentenze Processate", total)
     c_s2.metric("In Archivio Storico", validati)
-    c_s3.metric("Ricerca Semantica", "Attiva")
+    c_s3.metric("Ricerca AI", "Attiva")
     st.markdown("---")
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("#### 🔍 Come Funziona?")
-        st.write("1. **Caricamento**: Trascina PDF multipli.\n2. **Analisi IA**: Estrazione dati e redazione sistematica.\n3. **Validazione**: Conferma o modifica le bozze.\n4. **Ricerca AI**: Interroga l'archivio con domande libere.")
+        st.write("""
+        1. **Caricamento**: Trascina PDF multipli nella sezione 'Gestione'.
+        2. **Analisi IA**: Il sistema scansiona il testo e produce una bozza con l'oggetto della causa ampliato e il principio di diritto.
+        3. **Validazione**: Conferma o modifica le bozze generate.
+        4. **Ricerca AI**: Interroga l'intero archivio utilizzando il linguaggio naturale.
+        """)
     with c2:
         st.markdown("#### ⚖️ Metodologia Scientifica")
-        st.write("Ogni massima è strutturata per Parole Chiave, Oggetto della causa, Principio di Diritto, Norme ed Esito della decisione.")
+        st.write("""
+        La redazione delle massime segue uno schema analitico:
+        - **Oggetto della causa**: Descrizione dettagliata dei fatti e della lite.
+        - **Principio di Diritto**: La sintesi della 'ratio decidendi'.
+        - **Norme**: Riferimenti legislativi.
+        - **Esito**: Verdetto finale.
+        """)
     st.info("Piattaforma tecnologica sviluppata per l'Associazione Commercialisti Difensori Tributari del Veneto.")
 
 # --- TAB GESTIONE ---
 with tab_gest:
     col_up, col_rev = st.columns([0.35, 0.65])
     with col_up:
-        st.subheader("📤 Caricamento")
-        firma = st.text_input("Firma", value="Redazione")
-        u_files = st.file_uploader("PDF Sentenze", type="pdf", accept_multiple_files=True)
-        if st.button("🚀 AVVIA ANALISI SISTEMATICA"):
+        st.subheader("📤 Caricamento PDF")
+        firma = st.text_input("Firma Caricamento", value="Redazione")
+        u_files = st.file_uploader("Seleziona sentenze", type="pdf", accept_multiple_files=True)
+        if st.button("🚀 AVVIA ANALISI DETTAGLIATA"):
             if u_files:
                 for f in u_files:
                     f_id = str(uuid.uuid4()); path = f"storage/{f_id}.pdf"
                     os.makedirs("storage", exist_ok=True)
                     with open(path, "wb") as out: out.write(f.getbuffer())
-                    with st.spinner(f"Analisi: {f.name}..."):
+                    with st.spinner(f"Analisi fattispecie: {f.name}..."):
                         res, err = analizza_sentenza(path)
                         if not err:
                             db.add(Sentenza(id=f_id, organo=res["organo"], numero=res["numero"], massima=res["massima"], autore=firma, file_path=path))
                             db.commit()
                 st.rerun()
     with col_rev:
-        st.subheader("✍️ Revisione")
+        st.subheader("✍️ Revisione Massime")
         nuovi = db.query(Sentenza).filter(Sentenza.stato == "Nuovo").all()
         if nuovi:
-            if st.button("🚀 PUBBLICA TUTTO ORA"):
+            if st.button("🚀 PUBBLICA TUTTI I DOCUMENTI"):
                 for s in nuovi: s.stato = "Validato"
                 db.commit(); st.rerun()
             for s in nuovi:
                 with st.expander(f"📝 {s.organo} - n. {s.numero}", expanded=True):
                     o = st.text_input("Corte", s.organo, key=f"o{s.id}")
-                    n = st.text_input("Numero", s.numero, key=f"n{s.id}")
-                    m = st.text_area("Massima Sistematica", s.massima, height=350, key=f"m{s.id}")
-                    if st.button("✅ VALIDA", key=f"p{s.id}"):
+                    n = st.text_input("N.", s.numero, key=f"n{s.id}")
+                    m = st.text_area("Bozza Massima (Oggetto Ampliato)", s.massima, height=350, key=f"m{s.id}")
+                    if st.button("✅ VALIDA E ARCHIVIA", key=f"p{s.id}"):
                         s.organo, s.numero, s.massima, s.stato = o, n, m, "Validato"
                         db.commit(); st.rerun()
+        else: st.info("Nessuna analisi da revisionare.")
 
 # --- TAB RICERCA AI ---
 with tab_search:
-    st.subheader("🔍 Ricerca Intelligente")
-    domanda = st.text_input("Poni un quesito (es: 'Inammissibilità ricorso per mancata firma')")
+    st.subheader("🔍 Ricerca Semantica con Intelligenza Artificiale")
+    domanda = st.text_input("Descrivi un caso o poni un quesito giuridico...")
     if domanda:
         sv = db.query(Sentenza).filter(Sentenza.stato == "Validato").all()
         if sv:
-            with st.spinner("Consultazione archivio..."):
+            with st.spinner("L'IA sta consultando i precedenti in archivio..."):
                 r_ia = ricerca_ai(domanda, sv)
                 if r_ia and r_ia.get("risultati"):
                     for res in r_ia["risultati"]:
@@ -228,7 +240,7 @@ with tab_search:
                                 st.markdown(f"#### {s.organo} - n. {s.numero}")
                                 st.success(f"**RILEVANZA**: {res['perche']}")
                                 with st.expander("Leggi Massima"): st.write(s.massima)
-                else: st.warning("Nessun precedente trovato.")
+                else: st.warning("Nessun precedente trovato per questo quesito.")
         else: st.warning("L'archivio è vuoto.")
 
 # --- TAB ARCHIVIO ---
@@ -240,12 +252,12 @@ with tab_arch:
         out_ex = BytesIO()
         with pd.ExcelWriter(out_ex, engine='openpyxl') as wr:
             pd.DataFrame([{"Organo": i.organo, "Numero": i.numero, "Massima": i.massima.replace("**",""), "Autore": i.autore} for i in arch]).to_excel(wr, index=False)
-        c1.download_button("📊 EXCEL", out_ex.getvalue(), "archivio.xlsx", use_container_width=True)
-        c2.download_button("📝 WORD", genera_word(arch), "archivio.docx", use_container_width=True)
+        c1.download_button("📊 EXCEL RIEPILOGO", out_ex.getvalue(), "archivio.xlsx", use_container_width=True)
+        c2.download_button("📝 WORD REPORT", genera_word(arch), "archivio.docx", use_container_width=True)
         if c3.button("⚠️ RESET"):
             db.query(Sentenza).delete(); db.commit(); st.rerun()
         st.divider()
-        sk = st.text_input("🔍 Filtro rapido...")
+        sk = st.text_input("🔍 Filtro rapido (parole chiave)...")
         for i in arch:
             if sk.lower() in i.massima.lower() or sk.lower() in i.organo.lower():
                 with st.container(border=True):
