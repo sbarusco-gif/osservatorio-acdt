@@ -1,133 +1,142 @@
 import streamlit as st
-import os, uuid, fitz, json, time
+import os, uuid, fitz, json, time, re
 from sqlalchemy import create_engine, Column, String
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from groq import Groq
 
-# --- DATABASE CONFIG ---
+# --- DATABASE ---
 DB_URL = "sqlite:///./osservatorio.db"
 Base = declarative_base()
-
 class Sentenza(Base):
     __tablename__ = "sentenze"
     id = Column(String, primary_key=True)
     stato = Column(String, default="Nuovo") 
-    organo = Column(String)
-    numero = Column(String)
-    massima = Column(String)
-    file_path = Column(String)
+    organo = Column(String); numero = Column(String); massima = Column(String); file_path = Column(String)
 
 engine = create_engine(DB_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base.metadata.create_all(bind=engine)
 
-# --- FUNZIONE ANALISI CON GROQ (MODELLO AGGIORNATO) ---
+# --- FUNZIONE DI PULIZIA JSON ---
+def pulisci_json(testo_raw):
+    """Estrae il JSON puro anche se l'IA aggiunge commenti o backticks"""
+    try:
+        match = re.search(r'\{.*\}', testo_raw, re.DOTALL)
+        if match:
+            return json.loads(match.group())
+        return json.loads(testo_raw)
+    except:
+        return None
+
+# --- ANALISI IA ---
 def analizza_sentenza(file_path):
     api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        return None, "ERRORE: Manca la chiave GROQ_API_KEY su Render."
+    if not api_key: return None, "Manca GROQ_API_KEY su Render."
     
     client = Groq(api_key=api_key)
-    
     try:
         doc = fitz.open(file_path)
-        # Leggiamo inizio e fine del PDF
-        testo = doc[0].get_text() + "\n...\n" + doc[-1].get_text()
+        # Leggiamo più testo per sicurezza (prime 4 pagine + ultima)
+        testo_pagine = []
+        for i in range(min(4, len(doc))):
+            testo_pagine.append(doc[i].get_text())
+        if len(doc) > 4:
+            testo_pagine.append(doc[-1].get_text())
+        
+        testo_completo = "\n".join(testo_pagine).strip()
         doc.close()
         
-        prompt = f"""Analizza questa sentenza tributaria italiana ed estrai i dati in formato JSON.
-        REGOLE: 
-        1. Estrai l'organo giudicante.
-        2. Estrai il numero della sentenza e l'anno.
-        3. Scrivi una massima tecnica e astratta (principio di diritto).
-        4. Rispondi ESCLUSIVAMENTE con il JSON puro.
-        
-        TESTO: {testo[:8000]}"""
+        if len(testo_completo) < 100:
+            return None, "Il PDF sembra un'immagine (scansione). L'IA non può leggere il testo."
 
-        # MODELLO AGGIORNATO: llama-3.3-70b-versatile (Il più recente e potente)
-        chat_completion = client.chat.completions.create(
+        prompt = f"""Analizza questa sentenza tributaria. 
+        Estrai ESATTAMENTE questi campi in formato JSON:
+        - "organo": il nome della Corte/Commissione
+        - "numero": il numero della sentenza e l'anno
+        - "massima": un breve principio di diritto (massima tecnica)
+        
+        Documento:
+        {testo_completo[:10000]}"""
+
+        chat = client.chat.completions.create(
             messages=[
-                {"role": "system", "content": "Sei un esperto giurista che risponde solo in JSON."},
+                {"role": "system", "content": "Rispondi solo in JSON. Non aggiungere introduzioni."},
                 {"role": "user", "content": prompt}
             ],
             model="llama-3.3-70b-versatile",
-            temperature=0,
-            response_format={"type": "json_object"}
+            temperature=0.1
         )
         
-        dati = json.loads(chat_completion.choices[0].message.content)
+        risultato_raw = chat.choices[0].message.content
+        dati = pulisci_json(risultato_raw)
+        
+        if not dati:
+            return None, "L'IA ha risposto in un formato non leggibile. Riprova."
+            
         return dati, None
     except Exception as e:
-        return None, f"ERRORE GROQ: {str(e)}"
+        return None, f"Errore tecnico: {str(e)}"
 
-# --- INTERFACCIA STREAMLIT ---
-st.set_page_config(page_title="Osservatorio Groq", layout="wide", page_icon="⚖️")
+# --- UI ---
+st.set_page_config(page_title="ACDT Osservatorio", layout="wide")
 st.title("⚖️ Osservatorio Giurisprudenza Tributaria")
-st.caption("Motore AI: Llama 3.3 70B (Gratuito)")
 
 db = SessionLocal()
 t_gest, t_arch = st.tabs(["📋 Revisione", "📚 Archivio"])
 
 with t_gest:
     with st.sidebar:
-        st.header("Upload")
-        u_file = st.file_uploader("Carica PDF", type="pdf")
-        if st.button("🚀 ANALISI SUPER VELOCE"):
+        st.header("Carica PDF")
+        u_file = st.file_uploader("Seleziona file", type="pdf")
+        if st.button("🚀 ANALIZZA ORA"):
             if u_file:
                 f_id = str(uuid.uuid4())
                 os.makedirs("storage", exist_ok=True)
                 path = f"storage/{f_id}.pdf"
-                with open(path, "wb") as f:
-                    f.write(u_file.getbuffer())
+                with open(path, "wb") as f: f.write(u_file.getbuffer())
                 
-                with st.spinner("Analisi ultra-rapida con Llama 3.3..."):
-                    risultato, errore = analizza_sentenza(path)
-                    if errore:
-                        st.error(errore)
+                with st.spinner("Analisi in corso..."):
+                    res, err = analizza_sentenza(path)
+                    if err:
+                        st.error(err)
                     else:
                         s = Sentenza(
                             id=f_id, 
-                            organo=risultato.get("organo", "N/D"), 
-                            numero=risultato.get("numero", "N/D"), 
-                            massima=risultato.get("massima", "N/D"), 
+                            organo=res.get("organo", "Non trovato"), 
+                            numero=res.get("numero", "Non trovato"), 
+                            massima=res.get("massima", "Non trovata"), 
                             file_path=path
                         )
                         db.add(s); db.commit()
                         st.success("Analisi completata!")
                         time.sleep(1); st.rerun()
-            else:
-                st.warning("Carica un file.")
+            else: st.warning("Carica un file!")
 
-    st.subheader("Revisione")
+    st.subheader("Revisione Documenti")
     nuovi = db.query(Sentenza).filter(Sentenza.stato == "Nuovo").all()
-    if nuovi:
-        for s in nuovi:
-            with st.expander(f"MODIFICA: {s.organo} - {s.numero}", expanded=True):
-                o = st.text_input("Organo", s.organo, key=f"o{s.id}")
-                n = st.text_input("Numero", s.numero, key=f"n{s.id}")
-                m = st.text_area("Massima", s.massima, height=200, key=f"m{s.id}")
-                col1, col2 = st.columns(2)
-                if col1.button("✅ PUBBLICA", key=f"p{s.id}"):
-                    s.organo, s.numero, s.massima, s.stato = o, n, m, "Validato"
-                    db.commit(); st.rerun()
-                if col2.button("🗑️ ELIMINA", key=f"d{s.id}"):
-                    db.delete(s); db.commit(); st.rerun()
-    else:
-        st.info("Nessuna sentenza in attesa.")
+    for s in nuovi:
+        with st.expander(f"📝 {s.organo} - {s.numero}", expanded=True):
+            o = st.text_input("Organo", s.organo, key=f"o{s.id}")
+            n = st.text_input("Numero", s.numero, key=f"n{s.id}")
+            m = st.text_area("Massima", s.massima, height=200, key=f"m{s.id}")
+            c1, c2 = st.columns(2)
+            if c1.button("✅ PUBBLICA", key=f"p{s.id}"):
+                s.organo, s.numero, s.massima, s.stato = o, n, m, "Validato"
+                db.commit(); st.rerun()
+            if c2.button("🗑️ ELIMINA", key=f"d{s.id}"):
+                db.delete(s); db.commit(); st.rerun()
 
 with t_arch:
-    st.subheader("Archivio")
+    st.subheader("Archivio Storico")
     if st.button("⚠️ SVUOTA"):
         db.query(Sentenza).delete(); db.commit(); st.rerun()
-    
-    archivio = db.query(Sentenza).filter(Sentenza.stato == "Validato").all()
-    for item in archivio:
+    arch = db.query(Sentenza).filter(Sentenza.stato == "Validato").all()
+    for i in arch:
         with st.container(border=True):
-            st.write(f"**{item.organo} - n. {item.numero}**")
-            st.write(item.massima)
-            if os.path.exists(item.file_path):
-                with open(item.file_path, "rb") as f:
-                    st.download_button("📂 PDF", f, file_name=f"{item.numero}.pdf", key=item.id)
-
+            st.write(f"**{i.organo} - n. {i.numero}**")
+            st.write(i.massima)
+            if os.path.exists(i.file_path):
+                with open(i.file_path, "rb") as f:
+                    st.download_button("📂 PDF", f, file_name=f"{i.numero}.pdf", key=i.id)
 db.close()
