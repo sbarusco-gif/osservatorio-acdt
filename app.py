@@ -29,13 +29,13 @@ class Sentenza(Base):
 Base.metadata.create_all(bind=engine)
 SessionLocal = sessionmaker(bind=engine)
 
-# --- FUNZIONI LOGICHE ---
+# --- UTILS ---
 def formatta_massima_sicura(m_input):
-    if not m_input: return "Errore: IA non ha risposto correttamente."
+    if not m_input: return "Errore: Dati mancanti."
     if isinstance(m_input, dict):
         t = ""
         for k in ["Oggetto", "Principio di Diritto", "Ragionamento"]:
-            v = m_input.get(k) or m_input.get(k.lower()) or "Non rilevato"
+            v = m_input.get(k) or m_input.get(k.lower()) or "N/D"
             t += f"**{k.upper()}**:\n{v}\n\n"
         return t.strip()
     return str(m_input)
@@ -50,34 +50,44 @@ def pulisci_json(testo_raw):
 
 def analizza_sentenza(file_path):
     api_key = os.getenv("GROQ_API_KEY")
-    if not api_key: return None, "Manca GROQ_API_KEY su Render."
+    if not api_key: return None, "Manca la chiave API su Render."
+    
     client = Groq(api_key=api_key)
     try:
         doc = fitz.open(file_path)
-        testo = "".join([doc[i].get_text() for i in range(min(5, len(doc)))])
-        testo += "\n" + doc[-1].get_text()
+        # RIDUZIONE TESTO per risparmiare TOKEN: prime 2 pagine e l'ultima
+        pagine = [doc[i].get_text() for i in range(min(2, len(doc)))]
+        if len(doc) > 2:
+            pagine.append(doc[-1].get_text())
+        testo_essenziale = "\n".join(pagine).strip()
         doc.close()
         
-        prompt = f"""Analizza questa sentenza ed estrai in JSON: organo, numero, massima: {{Oggetto, Principio di Diritto, Ragionamento}}. Testo: {testo[:12000]}"""
+        # PROMPT OTTIMIZZATO
+        prompt = f"""Analizza questa sentenza ed estrai in JSON: organo, numero, massima: {{Oggetto, Principio di Diritto, Ragionamento}}. 
+        Testo: {testo_essenziale[:6000]}"""
+
         chat = client.chat.completions.create(
-            messages=[{"role": "system", "content": "Sei un giurista. Rispondi SOLO in JSON."},
+            messages=[{"role": "system", "content": "Sei un giurista sintetico. Rispondi SOLO in JSON."},
                       {"role": "user", "content": prompt}],
-            model="llama-3.3-70b-versatile",
-            temperature=0.1
+            # CAMBIO MODELLO: 'llama-3.1-8b-instant' ha limiti molto più alti
+            model="llama-3.1-8b-instant",
+            temperature=0.1,
+            max_tokens=1500
         )
+        
         dati = pulisci_json(chat.choices[0].message.content)
         if dati:
             dati["massima_finale"] = formatta_massima_sicura(dati.get("massima"))
             return dati, None
-        return None, "L'IA non ha restituito un formato valido."
-    except Exception as e: return None, str(e)
+        return None, "Errore nel formato dei dati."
+    except Exception as e:
+        return None, str(e)
 
 # --- UI STREAMLIT ---
-st.set_page_config(page_title="Osservatorio AI - Sebastiano Barusco", layout="wide")
+st.set_page_config(page_title="Osservatorio AI - Sebastiano Barusco", layout="wide", page_icon="⚖️")
 st.title("⚖️ Osservatorio Giurisprudenza Tributaria")
 
 db = SessionLocal()
-
 t_gest, t_arch = st.tabs(["📋 Gestione e Revisione", "📚 Archivio Storico"])
 
 with t_gest:
@@ -86,8 +96,8 @@ with t_gest:
     with col_up:
         st.header("1. Caricamento")
         autore_f = st.text_input("Firma Redattore", value="Redazione")
-        u_files = st.file_uploader("Trascina i PDF", type="pdf", accept_multiple_files=True)
-        btn_avvia = st.button("🚀 AVVIA ANALISI IA", use_container_width=True)
+        u_files = st.file_uploader("Seleziona PDF", type="pdf", accept_multiple_files=True)
+        btn_avvia = st.button("🚀 AVVIA ANALISI", use_container_width=True)
         st.markdown("---")
         st.write(f"👨‍💻 **Author:** {AUTORE_SOFTWARE}")
         st.caption(COPYRIGHT_NOTE)
@@ -97,9 +107,9 @@ with t_gest:
         
         if btn_avvia:
             if u_files:
-                container_status = st.container(border=True)
-                container_status.write("### ⏳ Analisi in corso...")
-                progress = container_status.progress(0)
+                status = st.container(border=True)
+                status.write("### ⏳ Analisi in corso...")
+                progress = status.progress(0)
                 
                 for idx, u_file in enumerate(u_files):
                     f_id = str(uuid.uuid4())
@@ -107,62 +117,51 @@ with t_gest:
                     path = f"storage/{f_id}.pdf"
                     with open(path, "wb") as f: f.write(u_file.getbuffer())
                     
-                    container_status.write(f"🔍 Analisi: {u_file.name}")
+                    status.write(f"🔍 Analizzando: {u_file.name}")
                     res, err = analizza_sentenza(path)
                     
                     if not err:
                         s = Sentenza(id=f_id, organo=res.get("organo"), numero=res.get("numero"),
                                      massima=res.get("massima_finale"), autore=autore_f, file_path=path)
-                        db.add(s)
-                        db.commit()
-                        container_status.success(f"✅ {u_file.name} analizzato!")
+                        db.add(s); db.commit()
+                        status.success(f"✅ {u_file.name} pronto!")
                     else:
-                        container_status.error(f"❌ {u_file.name}: {err}")
+                        status.error(f"❌ {u_file.name}: {err}")
                     
                     progress.progress((idx + 1) / len(u_files))
                 
-                st.balloons()
-                st.success("✅ ANALISI COMPLETATA! Clicca il tasto sotto per vedere i risultati.")
-                if st.button("👁️ MOSTRA SENTENZE ANALIZZATE"):
-                    st.rerun()
+                st.success("Analisi completata! Clicca il tasto sotto.")
+                if st.button("👁️ CARICA REVISIONE"): st.rerun()
             else:
-                st.warning("Seleziona i file PDF.")
+                st.warning("Carica i file!")
 
         # --- LISTA REVISIONE ---
         nuovi = db.query(Sentenza).filter(Sentenza.stato == "Nuovo").all()
         if nuovi:
-            st.info(f"Trovate {len(nuovi)} sentenze pronte per la revisione.")
             for s in nuovi:
                 with st.expander(f"📝 {s.organo} - {s.numero}", expanded=True):
                     o = st.text_input("Corte", s.organo, key=f"o{s.id}")
                     n = st.text_input("N. Sentenza", s.numero, key=f"n{s.id}")
-                    m = st.text_area("Massima Prodotta", s.massima, height=300, key=f"m{s.id}")
+                    m = st.text_area("Massima", s.massima, height=300, key=f"m{s.id}")
                     c1, c2 = st.columns(2)
-                    if c1.button("✅ CONVALIDA E PUBBLICA", key=f"p{s.id}", use_container_width=True):
+                    if c1.button("✅ PUBBLICA", key=f"p{s.id}", use_container_width=True):
                         s.organo, s.numero, s.massima, s.stato = o, n, m, "Validato"
-                        db.commit()
-                        st.rerun()
+                        db.commit(); st.rerun()
                     if c2.button("🗑️ ELIMINA", key=f"d{s.id}", use_container_width=True):
-                        db.delete(s)
-                        db.commit()
-                        st.rerun()
+                        db.delete(s); db.commit(); st.rerun()
         else:
-            if not btn_avvia:
-                st.info("Nessuna sentenza in attesa. Carica i file a sinistra.")
+            if not btn_avvia: st.info("In attesa di documenti.")
 
 with t_arch:
-    st.subheader("📚 Archivio Storico")
+    st.subheader("📚 Archivio Sentenze Validate")
     arch = db.query(Sentenza).filter(Sentenza.stato == "Validato").all()
     if arch:
-        df = pd.DataFrame([{"Organo": i.organo, "Sentenza": i.numero, "Firma": i.autore} for i in arch])
+        df = pd.DataFrame([{"Organo": i.organo, "Sentenza": i.numero, "Autore": i.autore} for i in arch])
         st.dataframe(df, use_container_width=True)
         
         c1, c2 = st.columns([0.8, 0.2])
-        if c2.button("⚠️ SVUOTA ARCHIVIO"):
-            db.query(Sentenza).delete()
-            db.commit()
-            st.rerun()
-            
+        if c2.button("⚠️ RESET"): db.query(Sentenza).delete(); db.commit(); st.rerun()
+        
         st.divider()
         for i in arch:
             with st.container(border=True):
@@ -176,6 +175,6 @@ with t_arch:
                         with open(i.file_path, "rb") as fp:
                             st.download_button("📂 PDF", fp, file_name=f"{i.numero}.pdf", key=f"dl_{i.id}")
     else:
-        st.info("L'archivio è vuoto.")
+        st.info("Archivio vuoto.")
 
 db.close()
